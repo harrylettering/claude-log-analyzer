@@ -1,7 +1,12 @@
-
-import { useState } from 'react';
-import { User, Bot, GitBranch, MessageSquare, ChevronDown, ChevronRight } from 'lucide-react';
+import { useState, useMemo, useCallback } from 'react';
+import { GitBranch, ChevronDown, ChevronRight, User, Bot, MessageSquare } from 'lucide-react';
 import type { ParsedLogData, LogEntry } from '../types/log';
+import {
+  getNodeIcon,
+  getNodeColor,
+  getNodeBorder,
+  getMessagePreview,
+} from '../utils/conversationHelpers';
 
 interface ConversationFlowProps {
   data: ParsedLogData;
@@ -11,60 +16,7 @@ interface FlatNode {
   entry: LogEntry;
   depth: number;
   isLastChild: boolean;
-  parentDepths: boolean[]; // true = has more siblings at that depth
-}
-
-function getNodeIcon(type: string) {
-  switch (type) {
-    case 'user': return <User className="w-3.5 h-3.5" />;
-    case 'assistant': return <Bot className="w-3.5 h-3.5" />;
-    default: return <MessageSquare className="w-3.5 h-3.5" />;
-  }
-}
-
-function getNodeColor(type: string) {
-  switch (type) {
-    case 'user': return 'bg-blue-500';
-    case 'assistant': return 'bg-purple-500';
-    case 'system': return 'bg-gray-500';
-    case 'file-history-snapshot': return 'bg-amber-500';
-    default: return 'bg-slate-500';
-  }
-}
-
-function getNodeBorder(type: string) {
-  switch (type) {
-    case 'user': return 'border-blue-500/40 bg-blue-500/5';
-    case 'assistant': return 'border-purple-500/40 bg-purple-500/5';
-    case 'system': return 'border-gray-500/40 bg-gray-500/5';
-    case 'file-history-snapshot': return 'border-amber-500/40 bg-amber-500/5';
-    default: return 'border-slate-500/40 bg-slate-500/5';
-  }
-}
-
-function getMessagePreview(entry: LogEntry): string {
-  if (entry.type === 'user' || entry.type === 'assistant') {
-    const msg = entry.message;
-    if (msg?.content) {
-      if (typeof msg.content === 'string') {
-        if (msg.content.includes('<command-name>')) {
-          const match = msg.content.match(/<command-name>(.*?)<\/command-name>/);
-          if (match) return `命令: /${match[1]}`;
-        }
-        return msg.content.substring(0, 80);
-      }
-      if (Array.isArray(msg.content)) {
-        const first = msg.content[0];
-        if (first?.type === 'text') return first.text?.substring(0, 80) || '';
-        if (first?.type === 'tool_use') return `工具: ${first.name}`;
-        if (first?.type === 'tool_result') return '工具结果';
-        if (first?.type === 'thinking') return '思考中...';
-      }
-    }
-  }
-  if (entry.type === 'file-history-snapshot') return '文件快照';
-  if (entry.type === 'system' && entry.subtype === 'turn_duration') return `轮次: ${entry.messageCount} 条消息`;
-  return entry.type;
+  parentDepths: boolean[];
 }
 
 type TreeNode = LogEntry & { children: TreeNode[] };
@@ -84,77 +36,89 @@ function flattenTree(nodes: TreeNode[], depth: number, parentDepths: boolean[], 
   });
 }
 
+const MAX_DEPTH_INDENT = 8;
+
 export function ConversationFlow({ data }: ConversationFlowProps) {
   const { entries } = data;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set());
 
-  // Build tree
-  const messageMap = new Map<string, TreeNode>();
+  // 使用 useMemo 缓存树形构建
+  const { flatNodes, messageMap } = useMemo(() => {
+    const messageMap = new Map<string, TreeNode>();
+    const childSet = new Set<string>();
 
-  // 第一步：为所有有 uuid 的 entry 创建节点
-  entries.forEach(entry => {
-    if (entry.uuid) {
-      messageMap.set(entry.uuid, { ...entry, children: [] });
-    }
-  });
-
-  // 第二步：建立父子关系
-  const childSet = new Set<string>();
-  entries.forEach(entry => {
-    if (entry.uuid && entry.parentUuid && messageMap.has(entry.parentUuid)) {
-      messageMap.get(entry.parentUuid)!.children.push(messageMap.get(entry.uuid)!);
-      childSet.add(entry.uuid);
-    }
-  });
-
-  // 第三步：不是任何节点子节点的 entry 就是根节点
-  const rootMessages: TreeNode[] = [];
-  entries.forEach(entry => {
-    if (entry.uuid && !childSet.has(entry.uuid)) {
-      rootMessages.push(messageMap.get(entry.uuid)!);
-    }
-  });
-
-  // 第四步：如果仍然没有根节点（例如所有 entry 都没有 uuid），将所有 entry 作为扁平列表
-  if (rootMessages.length === 0 && entries.length > 0) {
+    // 第一步：为所有有 uuid 的 entry 创建节点
     entries.forEach(entry => {
-      rootMessages.push({ ...entry, children: [] });
+      if (entry.uuid) {
+        messageMap.set(entry.uuid, { ...entry, children: [] });
+      }
     });
-  }
 
-  // Flatten with depth info
-  const flatNodes: FlatNode[] = [];
-  flattenTree(rootMessages, 0, [], flatNodes);
+    // 第二步：建立父子关系
+    entries.forEach(entry => {
+      if (entry.uuid && entry.parentUuid && messageMap.has(entry.parentUuid)) {
+        messageMap.get(entry.parentUuid)!.children.push(messageMap.get(entry.uuid)!);
+        childSet.add(entry.uuid);
+      }
+    });
 
-  // Filter out collapsed subtrees
-  const visibleNodes: FlatNode[] = [];
-  let skipUntilDepth: number | null = null;
-  flatNodes.forEach(node => {
-    const key = node.entry.uuid || '';
-    if (skipUntilDepth !== null) {
-      if (node.depth > skipUntilDepth) return;
-      skipUntilDepth = null;
+    // 第三步：不是任何节点子节点的 entry 就是根节点
+    const rootMessages: TreeNode[] = [];
+    entries.forEach(entry => {
+      if (entry.uuid && !childSet.has(entry.uuid)) {
+        rootMessages.push(messageMap.get(entry.uuid)!);
+      }
+    });
+
+    // 第四步：如果仍然没有根节点（例如所有 entry 都没有 uuid），将所有 entry 作为扁平列表
+    if (rootMessages.length === 0 && entries.length > 0) {
+      entries.forEach(entry => {
+        rootMessages.push({ ...entry, children: [] });
+      });
     }
-    visibleNodes.push(node);
-    if (collapsed.has(key) && messageMap.get(key)?.children.length) {
-      skipUntilDepth = node.depth;
-    }
-  });
 
-  const toggleCollapse = (key: string) => {
-    const next = new Set(collapsed);
-    next.has(key) ? next.delete(key) : next.add(key);
-    setCollapsed(next);
-  };
+    // Flatten with depth info
+    const flatNodes: FlatNode[] = [];
+    flattenTree(rootMessages, 0, [], flatNodes);
 
-  const toggleDetails = (key: string) => {
-    const next = new Set(expandedDetails);
-    next.has(key) ? next.delete(key) : next.add(key);
-    setExpandedDetails(next);
-  };
+    return { flatNodes, messageMap, rootMessages };
+  }, [entries]);
 
-  const MAX_DEPTH_INDENT = 8; // cap visual indent at 8 levels
+  // 使用 useMemo 过滤可见节点
+  const visibleNodes = useMemo(() => {
+    const result: FlatNode[] = [];
+    let skipUntilDepth: number | null = null;
+    flatNodes.forEach(node => {
+      const key = node.entry.uuid || '';
+      if (skipUntilDepth !== null) {
+        if (node.depth > skipUntilDepth) return;
+        skipUntilDepth = null;
+      }
+      result.push(node);
+      if (collapsed.has(key) && messageMap.get(key)?.children.length) {
+        skipUntilDepth = node.depth;
+      }
+    });
+    return result;
+  }, [flatNodes, collapsed, messageMap]);
+
+  // 使用 useCallback 优化事件处理
+  const toggleCollapse = useCallback((key: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
+
+  const toggleDetails = useCallback((key: string) => {
+    setExpandedDetails(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
 
   return (
     <div className="space-y-6">

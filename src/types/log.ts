@@ -1,11 +1,37 @@
 
+export interface MessageContent {
+  type?: string;
+  text?: string;
+  name?: string;
+  input?: unknown;
+  tool_use_id?: string;
+  id?: string;
+  content?: unknown;
+  output?: unknown;
+  is_error?: boolean;
+  error?: boolean;
+  [key: string]: unknown;
+}
+
+export interface Message {
+  content?: string | MessageContent[];
+  model?: string;
+  usage?: UsageData;
+  [key: string]: unknown;
+}
+
+export interface FileSnapshot {
+  trackedFileBackups?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 export interface LogEntry {
   type: 'user' | 'assistant' | 'system' | 'permission-mode' | 'file-history-snapshot';
   uuid?: string;
   timestamp: string;
   parentUuid?: string | null;
   isSidechain?: boolean;
-  message?: any;
+  message?: Message;
   sessionId?: string;
   version?: string;
   gitBranch?: string;
@@ -17,7 +43,7 @@ export interface LogEntry {
   sourceToolAssistantUUID?: string;
   isMeta?: boolean;
   permissionMode?: string;
-  snapshot?: any;
+  snapshot?: FileSnapshot;
   isSnapshotUpdate?: boolean;
   subtype?: string;
   durationMs?: number;
@@ -33,9 +59,9 @@ export interface UsageData {
 export interface ToolCall {
   id: string;
   name: string;
-  input: any;
+  input: unknown;
   timestamp: string;
-  result?: any;
+  result?: unknown;
   isError?: boolean;
   durationMs?: number;
 }
@@ -71,6 +97,6 @@ export interface ParsedLogData {
   fileHistory: Array<{
     timestamp: string;
     messageId: string;
-    files: any;
+    files: Record<string, unknown>;
   }>;
 }

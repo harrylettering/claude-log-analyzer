@@ -1,4 +1,4 @@
-
+import { useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { Zap, ArrowUp, ArrowDown } from 'lucide-react';
 import type { ParsedLogData } from '../types/log';
@@ -8,37 +8,44 @@ interface TokenDashboardProps {
   data: ParsedLogData;
 }
 
+const CustomTooltip = ({ active, payload, label }: any) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="bg-slate-800 border border-slate-600 rounded-lg p-3 shadow-lg">
+        <p className="text-slate-400 text-sm mb-2">{label}</p>
+        {payload.map((entry: any, index: number) => (
+          <p key={index} style={{ color: entry.color }} className="text-sm">
+            {entry.name}: {formatTokens(entry.value)}
+          </p>
+        ))}
+      </div>
+    );
+  }
+  return null;
+};
+
 export function TokenDashboard({ data }: TokenDashboardProps) {
   const { tokenUsage, stats } = data;
 
-  // 准备累计数据
-  const cumulativeData = tokenUsage.reduce((acc, curr, index) => {
-    const prev = acc[index - 1] || { cumulativeInput: 0, cumulativeOutput: 0, cumulativeTotal: 0 };
-    acc.push({
-      ...curr,
-      time: new Date(curr.timestamp).toLocaleTimeString(),
-      cumulativeInput: prev.cumulativeInput + curr.inputTokens,
-      cumulativeOutput: prev.cumulativeOutput + curr.outputTokens,
-      cumulativeTotal: prev.cumulativeTotal + curr.totalTokens,
-    });
-    return acc;
-  }, [] as Array<any>);
+  // 使用 useMemo 缓存累计数据计算
+  const cumulativeData = useMemo(() => {
+    return tokenUsage.reduce((acc, curr, index) => {
+      const prev = acc[index - 1] || { cumulativeInput: 0, cumulativeOutput: 0, cumulativeTotal: 0 };
+      acc.push({
+        ...curr,
+        time: new Date(curr.timestamp).toLocaleTimeString(),
+        cumulativeInput: prev.cumulativeInput + curr.inputTokens,
+        cumulativeOutput: prev.cumulativeOutput + curr.outputTokens,
+        cumulativeTotal: prev.cumulativeTotal + curr.totalTokens,
+      });
+      return acc;
+    }, [] as Array<any>);
+  }, [tokenUsage]);
 
-  const CustomTooltip = ({ active, payload, label }: any) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="bg-slate-800 border border-slate-600 rounded-lg p-3 shadow-lg">
-          <p className="text-slate-400 text-sm mb-2">{label}</p>
-          {payload.map((entry: any, index: number) => (
-            <p key={index} style={{ color: entry.color }} className="text-sm">
-              {entry.name}: {formatTokens(entry.value)}
-            </p>
-          ))}
-        </div>
-      );
-    }
-    return null;
-  };
+  // 使用 useMemo 缓存每次请求的数据
+  const perRequestData = useMemo(() => {
+    return tokenUsage.map(d => ({ ...d, time: new Date(d.timestamp).toLocaleTimeString() }));
+  }, [tokenUsage]);
 
   return (
     <div className="space-y-6">
@@ -83,7 +90,7 @@ export function TokenDashboard({ data }: TokenDashboardProps) {
         <div className="bg-slate-800 rounded-xl p-6 border border-slate-700">
           <h3 className="text-lg font-semibold mb-4">每次请求的 Token 使用</h3>
           <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={tokenUsage.map(d => ({ ...d, time: new Date(d.timestamp).toLocaleTimeString() }))}>
+            <LineChart data={perRequestData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
               <XAxis dataKey="time" stroke="#94a3b8" />
               <YAxis stroke="#94a3b8" tickFormatter={(value) => formatTokens(value)} />

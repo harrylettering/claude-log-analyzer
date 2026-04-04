@@ -11,7 +11,7 @@ interface PerformanceViewProps {
 const COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#10b981'];
 
 export function PerformanceView({ data }: PerformanceViewProps) {
-  const { turnDurations, stats } = data;
+  const { turnDurations } = data;
 
   // 计算性能统计
   const durations = turnDurations.map(d => d.durationMs);

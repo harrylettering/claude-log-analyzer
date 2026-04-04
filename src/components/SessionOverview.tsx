@@ -1,16 +1,25 @@
-
+import { useMemo } from 'react';
 import { MessageCircle, Settings, Clock, FileText, Zap, DollarSign } from 'lucide-react';
 import type { ParsedLogData } from '../types/log';
 import { formatDuration, formatTokens } from '../utils/logParser';
+import { PRICING } from '../constants';
 
 interface SessionOverviewProps {
   data: ParsedLogData;
 }
 
+interface StatCard {
+  title: string;
+  value: string | number;
+  icon: React.ReactNode;
+  color: string;
+}
+
 export function SessionOverview({ data }: SessionOverviewProps) {
   const { stats } = data;
 
-  const cards = [
+  // 使用 useMemo 缓存卡片数据
+  const cards: StatCard[] = useMemo(() => [
     {
       title: '总消息数',
       value: stats.totalMessages,
@@ -59,10 +68,20 @@ export function SessionOverview({ data }: SessionOverviewProps) {
       icon: <FileText className="w-5 h-5" />,
       color: 'from-pink-500 to-rose-500',
     },
-  ];
+  ], [stats]);
 
-  // 估算成本（基于 Claude 3.5 Sonnet 定价）
-  const estimatedCost = (stats.inputTokens * 0.000003) + (stats.outputTokens * 0.000015);
+  // 使用 useMemo 缓存成本计算
+  const costCalculation = useMemo(() => {
+    const inputCost = stats.inputTokens * (PRICING.INPUT_PER_MTOK / 1_000_000);
+    const outputCost = stats.outputTokens * (PRICING.OUTPUT_PER_MTOK / 1_000_000);
+    const totalCost = inputCost + outputCost;
+    return { inputCost, outputCost, totalCost };
+  }, [stats.inputTokens, stats.outputTokens]);
+
+  // 辅助函数：获取图标颜色类名
+  const getIconColorClass = (color: string) => {
+    return color.replace('from-', 'text-').replace(' to-', '-500').split(' ')[0];
+  };
 
   return (
     <div className="space-y-6">
@@ -77,7 +96,7 @@ export function SessionOverview({ data }: SessionOverviewProps) {
           <div key={idx} className="bg-slate-800 rounded-xl p-5 border border-slate-700">
             <div className="flex items-center justify-between mb-3">
               <div className={`p-2 rounded-lg bg-gradient-to-br ${card.color} opacity-10`}>
-                <div className={card.color.replace('from-', 'text-').replace(' to-', '-500').split(' ')[0]}>
+                <div className={getIconColorClass(card.color)}>
                   {card.icon}
                 </div>
               </div>
@@ -99,18 +118,20 @@ export function SessionOverview({ data }: SessionOverviewProps) {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="bg-slate-700/50 rounded-lg p-4">
             <div className="text-slate-400 text-sm mb-1">输入成本</div>
-            <div className="text-xl font-semibold">${(stats.inputTokens * 0.000003).toFixed(4)}</div>
+            <div className="text-xl font-semibold">${costCalculation.inputCost.toFixed(4)}</div>
           </div>
           <div className="bg-slate-700/50 rounded-lg p-4">
             <div className="text-slate-400 text-sm mb-1">输出成本</div>
-            <div className="text-xl font-semibold">${(stats.outputTokens * 0.000015).toFixed(4)}</div>
+            <div className="text-xl font-semibold">${costCalculation.outputCost.toFixed(4)}</div>
           </div>
           <div className="bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-lg p-4 border border-green-500/30">
             <div className="text-slate-400 text-sm mb-1">总计</div>
-            <div className="text-xl font-semibold text-green-400">${estimatedCost.toFixed(4)}</div>
+            <div className="text-xl font-semibold text-green-400">${costCalculation.totalCost.toFixed(4)}</div>
           </div>
         </div>
-        <p className="text-slate-500 text-xs mt-3">* 基于 Claude 3.5 Sonnet 定价估算 ($3/MTok 输入, $15/MTok 输出)</p>
+        <p className="text-slate-500 text-xs mt-3">
+          * 基于 Claude 3.5 Sonnet 定价估算 (${PRICING.INPUT_PER_MTOK}/MTok 输入, ${PRICING.OUTPUT_PER_MTOK}/MTok 输出)
+        </p>
       </div>
 
       {/* 使用的模型 */}

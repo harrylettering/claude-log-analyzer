@@ -1,47 +1,26 @@
-
-import { useState, useEffect, useRef } from 'react';
-import { Play, Pause, Search, Filter, Download, FileText } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Play, Pause, Download, FileText } from 'lucide-react';
 import type { ParsedLogData, LogEntry } from '../types/log';
 import { parseLog } from '../utils/logParser';
+import { filterEntries } from '../utils/searchFilter';
+import type { SearchFilters } from '../types/search';
+import { DEFAULT_FILTERS } from '../types/search';
+import { AdvancedSearchFilter } from './AdvancedSearchFilter';
 
 interface RealTimeLogProps {
   data: ParsedLogData;
   onDataUpdate: (data: ParsedLogData) => void;
 }
 
-type FilterType = 'all' | 'user' | 'assistant' | 'system' | 'tool';
-
 export function RealTimeLog({ data, onDataUpdate }: RealTimeLogProps) {
   const [isPaused, setIsPaused] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterType, setFilterType] = useState<FilterType>('all');
+  const [filters, setFilters] = useState<SearchFilters>(DEFAULT_FILTERS);
   const [autoScroll, setAutoScroll] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // 过滤日志条目
-  const filteredEntries = data.entries.filter(entry => {
-    // 类型过滤
-    if (filterType !== 'all') {
-      if (filterType === 'tool') {
-        // 工具消息需要检查内容
-        const hasTool = entry.message?.content?.some?.((c: any) =>
-          c.type === 'tool_use' || c.type === 'tool_result'
-        );
-        if (!hasTool) return false;
-      } else if (entry.type !== filterType) {
-        return false;
-      }
-    }
-
-    // 搜索过滤
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      const contentStr = JSON.stringify(entry).toLowerCase();
-      if (!contentStr.includes(query)) return false;
-    }
-
-    return true;
-  });
+  const searchResult = filterEntries(data.entries, filters);
+  const filteredEntries = searchResult.entries;
 
   // 自动滚动
   useEffect(() => {
@@ -51,19 +30,19 @@ export function RealTimeLog({ data, onDataUpdate }: RealTimeLogProps) {
   }, [filteredEntries.length, autoScroll, isPaused]);
 
   // 文件拖放处理
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
         const content = event.target?.result as string;
-        const newData = parseLog(content);
-        onDataUpdate(newData);
+        const result = parseLog(content);
+        onDataUpdate(result.data);
       };
       reader.readAsText(file);
     }
-  };
+  }, [onDataUpdate]);
 
   const getEntryBadgeColor = (type: string) => {
     switch (type) {
@@ -121,56 +100,30 @@ export function RealTimeLog({ data, onDataUpdate }: RealTimeLogProps) {
         </div>
       </div>
 
-      {/* 工具栏 */}
-      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
-        <div className="flex flex-wrap gap-4">
-          {/* 搜索框 */}
-          <div className="flex-1 min-w-[200px]">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-              <input
-                type="text"
-                placeholder="搜索日志内容..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-600 rounded-lg pl-10 pr-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-          </div>
+      {/* 高级搜索过滤器 */}
+      <AdvancedSearchFilter
+        entries={data.entries}
+        filters={filters}
+        onFiltersChange={setFilters}
+        resultCount={searchResult.filteredCount}
+        totalCount={searchResult.totalCount}
+      />
 
-          {/* 过滤器 */}
-          <div className="flex items-center gap-2">
-            <Filter className="w-4 h-4 text-slate-400" />
-            <select
-              value={filterType}
-              onChange={(e) => setFilterType(e.target.value as FilterType)}
-              className="bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="all">全部类型</option>
-              <option value="user">用户消息</option>
-              <option value="assistant">助手消息</option>
-              <option value="system">系统消息</option>
-              <option value="tool">工具消息</option>
-            </select>
-          </div>
-
-          {/* 自动滚动 */}
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoScroll}
-              onChange={(e) => setAutoScroll(e.target.checked)}
-              className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-500 focus:ring-blue-500"
-            />
-            <span className="text-sm text-slate-300">自动滚动</span>
-          </label>
-        </div>
-
-        {/* 统计信息 */}
-        <div className="mt-4 flex items-center gap-6 text-sm text-slate-400">
-          <span>总计: {data.entries.length} 条</span>
-          <span>显示: {filteredEntries.length} 条</span>
-          {searchQuery && <span>搜索: "{searchQuery}"</span>}
+      {/* 自动滚动 */}
+      <div className="flex items-center justify-between">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={autoScroll}
+            onChange={(e) => setAutoScroll(e.target.checked)}
+            className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-500 focus:ring-blue-500"
+          />
+          <span className="text-sm text-slate-300">自动滚动</span>
+        </label>
+        <div className="text-sm text-slate-400">
+          {filters.query && (
+            <span>匹配: {searchResult.matchCount} 条</span>
+          )}
         </div>
       </div>
 

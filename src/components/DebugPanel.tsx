@@ -1,5 +1,4 @@
-
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import type { ParsedLogData } from '../types/log';
 
 interface DebugPanelProps {
@@ -9,6 +8,14 @@ interface DebugPanelProps {
 export function DebugPanel({ data }: DebugPanelProps) {
   const [showTokenUsage, setShowTokenUsage] = useState(false);
   const [showSampleEntries, setShowSampleEntries] = useState(false);
+
+  const toggleTokenUsage = useCallback(() => {
+    setShowTokenUsage(prev => !prev);
+  }, []);
+
+  const toggleSampleEntries = useCallback(() => {
+    setShowSampleEntries(prev => !prev);
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -30,7 +37,7 @@ export function DebugPanel({ data }: DebugPanelProps) {
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold">Token Usage 数据 ({data.tokenUsage.length} 条)</h3>
           <button
-            onClick={() => setShowTokenUsage(!showTokenUsage)}
+            onClick={toggleTokenUsage}
             className="px-3 py-1 bg-blue-600 rounded text-sm hover:bg-blue-500"
           >
             {showTokenUsage ? '隐藏' : '显示'}
@@ -49,7 +56,7 @@ export function DebugPanel({ data }: DebugPanelProps) {
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold">日志条目样本 (前 3 条)</h3>
           <button
-            onClick={() => setShowSampleEntries(!showSampleEntries)}
+            onClick={toggleSampleEntries}
             className="px-3 py-1 bg-purple-600 rounded text-sm hover:bg-purple-500"
           >
             {showSampleEntries ? '隐藏' : '显示'}

@@ -42,7 +42,7 @@ export function FileHistory({ data }: FileHistoryProps) {
 
                 {fileCount > 0 ? (
                   <div className="space-y-2">
-                    {Object.entries(snapshot.files).map(([filePath, fileData]) => (
+                    {Object.entries(snapshot.files).map(([filePath, _fileData]) => (
                       <div key={filePath} className="bg-slate-700/50 rounded-lg p-3 border border-slate-600">
                         <div className="font-mono text-sm">{filePath}</div>
                         <div className="text-slate-400 text-xs mt-1">

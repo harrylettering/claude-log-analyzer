@@ -1,6 +1,6 @@
 
 import { useState } from 'react';
-import { Download, FileText, FileJson, FileSpreadsheet, Image, CheckCircle } from 'lucide-react';
+import { Download, FileText, FileJson, FileSpreadsheet, CheckCircle } from 'lucide-react';
 import type { ParsedLogData } from '../types/log';
 
 interface ExportPanelProps {
@@ -60,9 +60,10 @@ export function ExportPanel({ data }: ExportPanelProps) {
         }
 
         if (msg?.usage) {
-          inputTokens = msg.usage.input_tokens || '';
-          outputTokens = msg.usage.output_tokens || '';
-          totalTokens = msg.usage.total_tokens || '';
+          const usage = msg.usage as Record<string, unknown>;
+          inputTokens = String(usage.input_tokens ?? usage.inputTokens ?? '');
+          outputTokens = String(usage.output_tokens ?? usage.outputTokens ?? '');
+          totalTokens = String(usage.total_tokens ?? usage.totalTokens ?? '');
         }
 
         return [

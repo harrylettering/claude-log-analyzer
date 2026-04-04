@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
 import { Settings, CheckCircle, XCircle, ChevronDown, ChevronRight } from 'lucide-react';
-import type { ParsedLogData, ToolCall } from '../types/log';
+import type { ParsedLogData } from '../types/log';
 import { formatDuration } from '../utils/logParser';
 
 interface ToolAnalysisProps {
@@ -118,7 +118,7 @@ export function ToolAnalysis({ data }: ToolAnalysisProps) {
               <Tooltip content={<CustomTooltip />} />
               <Legend />
               <Bar dataKey="count" name="调用次数" radius={[8, 8, 0, 0]}>
-                {toolStats.map((entry, index) => (
+                {toolStats.map((_entry, index) => (
                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                 ))}
               </Bar>
@@ -172,7 +172,7 @@ export function ToolAnalysis({ data }: ToolAnalysisProps) {
                         {JSON.stringify(tool.input, null, 2)}
                       </pre>
                     </div>
-                    {tool.result && (
+                    {tool.result !== undefined && (
                       <div>
                         <h4 className="text-sm font-semibold text-slate-400 mb-2">输出</h4>
                         <pre className="bg-slate-900 p-3 rounded text-xs overflow-auto max-h-48">

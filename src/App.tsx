@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { BarChart2, MessageSquare, Clock, Wrench, Zap, FileText, Upload, History, Download, Bug } from 'lucide-react'
+import { BarChart2, MessageSquare, Clock, Wrench, Zap, FileText, Upload, History, Download, Bug, AlertCircle, Loader2, Brain, GitMerge } from 'lucide-react'
 import { parseLog } from './utils/logParser'
 import type { ParsedLogData } from './types/log'
 import { FileUpload } from './components/FileUpload'
@@ -13,11 +13,15 @@ import { RealTimeLog } from './components/RealTimeLog'
 import { FileHistory } from './components/FileHistory'
 import { ExportPanel } from './components/ExportPanel'
 import { DebugPanel } from './components/DebugPanel'
+import { AIAnalysis } from './components/AIAnalysis'
+import { SessionCompare } from './components/SessionCompare'
 
-type ViewId = 'overview' | 'tokens' | 'timeline' | 'conversation' | 'tools' | 'performance' | 'realtime' | 'history' | 'export' | 'debug'
+type ViewId = 'overview' | 'tokens' | 'timeline' | 'conversation' | 'tools' | 'performance' | 'realtime' | 'history' | 'export' | 'debug' | 'ai-analysis' | 'compare'
 
 const navItems: { id: ViewId; label: string; icon: React.ReactNode }[] = [
   { id: 'overview', label: '会话概览', icon: <BarChart2 className="w-4 h-4" /> },
+  { id: 'ai-analysis', label: 'AI 分析', icon: <Brain className="w-4 h-4" /> },
+  { id: 'compare', label: '会话对比', icon: <GitMerge className="w-4 h-4" /> },
   { id: 'tokens', label: 'Token 统计', icon: <Zap className="w-4 h-4" /> },
   { id: 'timeline', label: '时间轴', icon: <Clock className="w-4 h-4" /> },
   { id: 'conversation', label: '对话流程', icon: <MessageSquare className="w-4 h-4" /> },
@@ -33,29 +37,50 @@ export default function App() {
   const [logData, setLogData] = useState<ParsedLogData | null>(null)
   const [currentView, setCurrentView] = useState<ViewId>('overview')
   const [error, setError] = useState<string | null>(null)
+  const [parseWarnings, setParseWarnings] = useState<string[]>([])
+  const [isLoading, setIsLoading] = useState(false)
 
   const handleFileLoad = useCallback((content: string) => {
-    try {
-      const parsed = parseLog(content)
-      setLogData(parsed)
-      setError(null)
-      setCurrentView('overview')
-    } catch (e) {
-      setError('解析日志失败，请检查文件格式')
-      console.error(e)
-    }
+    setIsLoading(true)
+    setError(null)
+    setParseWarnings([])
+
+    // 使用 setTimeout 让 UI 有时间渲染加载状态
+    setTimeout(() => {
+      try {
+        const result = parseLog(content)
+        setLogData(result.data)
+        setCurrentView('overview')
+
+        if (result.errors.length > 0) {
+          setParseWarnings([
+            `成功解析 ${result.data.entries.length} 条日志`,
+            `有 ${result.errors.length} 行解析失败`,
+          ])
+        }
+      } catch (e) {
+        setError('解析日志失败，请检查文件格式')
+        console.error(e)
+      } finally {
+        setIsLoading(false)
+      }
+    }, 50)
   }, [])
 
   const renderView = () => {
+    if (currentView === 'compare') {
+      return <SessionCompare defaultSession={logData || undefined} />
+    }
     if (!logData) return null
     switch (currentView) {
       case 'overview': return <SessionOverview data={logData} />
+      case 'ai-analysis': return <AIAnalysis data={logData} />
       case 'tokens': return <TokenDashboard data={logData} />
       case 'timeline': return <TimelineView data={logData} />
       case 'conversation': return <ConversationFlow data={logData} />
       case 'tools': return <ToolAnalysis data={logData} />
       case 'performance': return <PerformanceView data={logData} />
-      case 'realtime': return <RealTimeLog data={logData} onDataUpdate={setLogData} />
+      case 'realtime': return <RealTimeLog data={logData} onDataUpdate={(data) => setLogData(data)} />
       case 'history': return <FileHistory data={logData} />
       case 'export': return <ExportPanel data={logData} />
       case 'debug': return <DebugPanel data={logData} />
@@ -75,7 +100,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           {!logData && (
             <div className="w-48">
-              <FileUpload onFileLoad={handleFileLoad} isDark={true} />
+              <FileUpload onFileLoad={handleFileLoad} isDark={true} disabled={isLoading} />
             </div>
           )}
           {logData && (
@@ -92,35 +117,65 @@ export default function App() {
 
       <div className="flex">
         {/* Sidebar */}
-        {logData && (
+        {(logData || currentView === 'compare') && (
           <aside className="w-48 border-r min-h-screen p-3 border-slate-700 bg-slate-800/30">
             <nav className="space-y-1">
-              {navItems.map(item => (
-                <button
-                  key={item.id}
-                  onClick={() => setCurrentView(item.id)}
-                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
-                    currentView === item.id
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-300 hover:bg-slate-700'
-                  }`}
-                >
-                  {item.icon}
-                  {item.label}
-                </button>
-              ))}
+              {navItems.map(item => {
+                // 如果没有加载日志，只显示会话对比
+                if (!logData && item.id !== 'compare') return null;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => setCurrentView(item.id)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
+                        currentView === item.id
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-300 hover:bg-slate-700'
+                    }`}
+                  >
+                    {item.icon}
+                    {item.label}
+                  </button>
+                );
+              })}
             </nav>
           </aside>
         )}
 
         {/* Main content */}
         <main className="flex-1 min-w-0 overflow-x-hidden p-6">
+          {/* 加载状态 */}
+          {isLoading && (
+            <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
+              <Loader2 className="w-12 h-12 text-blue-500 animate-spin" />
+              <p className="text-slate-400">正在解析日志文件...</p>
+            </div>
+          )}
+
+          {/* 错误提示 */}
           {error && (
-            <div className="mb-4 p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+            <div className="mb-4 p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm flex items-center gap-2">
+              <AlertCircle className="w-4 h-4" />
               {error}
             </div>
           )}
-          {!logData ? (
+
+          {/* 解析警告 */}
+          {parseWarnings.length > 0 && (
+            <div className="mb-4 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 text-sm">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertCircle className="w-4 h-4" />
+                <span className="font-semibold">解析警告</span>
+              </div>
+              <ul className="list-disc list-inside space-y-1">
+                {parseWarnings.map((warning, idx) => (
+                  <li key={idx}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {!isLoading && !logData ? (
             <div className="flex flex-col items-center justify-center min-h-[60vh] gap-6">
               <div className="text-center">
                 <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center mx-auto mb-4">
@@ -132,7 +187,7 @@ export default function App() {
                 </p>
               </div>
               <div className="w-80">
-                <FileUpload onFileLoad={handleFileLoad} isDark={true} />
+                <FileUpload onFileLoad={handleFileLoad} isDark={true} disabled={isLoading} />
               </div>
             </div>
           ) : (
