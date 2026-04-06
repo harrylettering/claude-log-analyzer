@@ -1,8 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useEffect } from 'react';
 import { MessageCircle, Settings, Clock, FileText, Zap, DollarSign } from 'lucide-react';
 import type { ParsedLogData } from '../types/log';
 import { formatDuration, formatTokens } from '../utils/logParser';
 import { PRICING } from '../constants';
+import { useBudgetContext } from '../contexts/BudgetContext';
+import { BudgetProgress } from './BudgetProgress';
 
 interface SessionOverviewProps {
   data: ParsedLogData;
@@ -13,10 +15,26 @@ interface StatCard {
   value: string | number;
   icon: React.ReactNode;
   color: string;
+  subtitle?: string;
 }
 
 export function SessionOverview({ data }: SessionOverviewProps) {
   const { stats } = data;
+  const { updateSessionCost, removeSessionCost, budgetUsage, currentBudget } = useBudgetContext();
+
+  // 计算当前会话成本
+  const sessionCost = useMemo(() => {
+    const inputCost = stats.inputTokens * (PRICING.INPUT_PER_MTOK / 1_000_000);
+    const outputCost = stats.outputTokens * (PRICING.OUTPUT_PER_MTOK / 1_000_000);
+    return inputCost + outputCost;
+  }, [stats.inputTokens, stats.outputTokens]);
+
+  // 更新会话成本到预算管理器
+  useEffect(() => {
+    const sessionId = data.entries[0]?.uuid || 'single-session';
+    updateSessionCost(sessionId, sessionCost);
+    return () => removeSessionCost(sessionId);
+  }, [sessionCost, updateSessionCost, removeSessionCost, data.entries]);
 
   // 使用 useMemo 缓存卡片数据
   const cards: StatCard[] = useMemo(() => [
@@ -31,6 +49,7 @@ export function SessionOverview({ data }: SessionOverviewProps) {
       value: stats.userMessages,
       icon: <MessageCircle className="w-5 h-5" />,
       color: 'from-green-500 to-emerald-500',
+      subtitle: '仅真实用户输入，不含工具结果',
     },
     {
       title: '助手消息',
@@ -103,6 +122,9 @@ export function SessionOverview({ data }: SessionOverviewProps) {
             </div>
             <div className="text-2xl font-bold mb-1">{card.value}</div>
             <div className="text-slate-400 text-sm">{card.title}</div>
+            {card.subtitle && (
+              <div className="text-slate-500 text-xs mt-1">{card.subtitle}</div>
+            )}
           </div>
         ))}
       </div>
@@ -133,6 +155,11 @@ export function SessionOverview({ data }: SessionOverviewProps) {
           * 基于 Claude 3.5 Sonnet 定价估算 (${PRICING.INPUT_PER_MTOK}/MTok 输入, ${PRICING.OUTPUT_PER_MTOK}/MTok 输出)
         </p>
       </div>
+
+      {/* 预算进度 */}
+      {currentBudget > 0 && (
+        <BudgetProgress usage={budgetUsage} />
+      )}
 
       {/* 使用的模型 */}
       {stats.modelsUsed.length > 0 && (

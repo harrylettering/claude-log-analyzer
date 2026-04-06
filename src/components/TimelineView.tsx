@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, PlayCircle } from 'lucide-react';
 import type { ParsedLogData } from '../types/log';
 import {
   getEntryIcon,
@@ -14,9 +14,10 @@ import { AdvancedSearchFilter } from './AdvancedSearchFilter';
 
 interface TimelineViewProps {
   data: ParsedLogData;
+  onStartReplay?: (index: number) => void;
 }
 
-export function TimelineView({ data }: TimelineViewProps) {
+export function TimelineView({ data, onStartReplay }: TimelineViewProps) {
   const [expandedEntries, setExpandedEntries] = useState<Set<string>>(new Set());
   const [filters, setFilters] = useState<SearchFilters>(DEFAULT_FILTERS);
 
@@ -102,6 +103,15 @@ export function TimelineView({ data }: TimelineViewProps) {
                         <span className="text-slate-400 text-sm">
                           {new Date(entry.timestamp).toLocaleTimeString()}
                         </span>
+                        {onStartReplay && (
+                          <button
+                            onClick={() => onStartReplay(index)}
+                            className="p-1 hover:bg-blue-600/20 rounded text-blue-400 hover:text-blue-300"
+                            title="从这里开始回放"
+                          >
+                            <PlayCircle className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           onClick={() => toggleExpand(key)}
                           className="p-1 hover:bg-slate-700 rounded"

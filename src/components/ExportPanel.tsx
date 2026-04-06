@@ -52,15 +52,15 @@ export function ExportPanel({ data }: ExportPanelProps) {
           } else if (Array.isArray(msg.content)) {
             const first = msg.content[0];
             if (first?.type === 'text') {
-              contentPreview = (first.text || '').substring(0, 100).replace(/\n/g, ' ');
+              contentPreview = ((first as any).text || '').substring(0, 100).replace(/\n/g, ' ');
             } else if (first?.type === 'tool_use') {
-              contentPreview = `tool:${first.name}`;
+              contentPreview = `tool:${(first as any).name}`;
             }
           }
         }
 
         if (msg?.usage) {
-          const usage = msg.usage as Record<string, unknown>;
+          const usage = msg.usage as unknown as Record<string, unknown>;
           inputTokens = String(usage.input_tokens ?? usage.inputTokens ?? '');
           outputTokens = String(usage.output_tokens ?? usage.outputTokens ?? '');
           totalTokens = String(usage.total_tokens ?? usage.totalTokens ?? '');

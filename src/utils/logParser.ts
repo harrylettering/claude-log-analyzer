@@ -1,4 +1,14 @@
-import type { LogEntry, ParsedLogData, SessionStats, ToolCall, MessageContent } from '../types/log';
+import type {
+  LogEntry,
+  ParsedLogData,
+  SessionStats,
+  ToolCall,
+  EntryCategory,
+  ContentBlock,
+  ToolUseBlock,
+  ToolResultBlock,
+  TextBlock,
+} from '../types/log';
 import {
   MAX_TOKEN_VALUE,
   TOKEN_FORMATTING,
@@ -17,98 +27,179 @@ export interface ParseResult {
   errors: ParseError[];
 }
 
-// Sanitize token values - cap at reasonable max to prevent anomalies
+// ============ 分类函数 ============
+
+export function categorizeEntry(entry: LogEntry): EntryCategory {
+  // 特殊类型
+  if (entry.type === 'summary') return 'SUMMARY';
+  if (entry.type === 'system') return 'SYSTEM';
+  if (entry.type === 'file_history' || entry.type === 'file-history-snapshot') {
+    return 'FILE_HISTORY';
+  }
+
+  // Assistant 消息
+  if (entry.type === 'assistant') {
+    const content = entry.message?.content || [];
+    const contentArray = Array.isArray(content) ? content : [];
+
+    const hasThinking = contentArray.some((b) => b.type === 'thinking');
+    const hasToolUse = contentArray.some((b) => b.type === 'tool_use');
+    const hasText = contentArray.some((b) => b.type === 'text');
+
+    if (hasToolUse) return 'ASSISTANT_TOOL_CALL';
+    if (hasThinking && hasText) return 'ASSISTANT_THINKING_RESPONSE';
+    return 'ASSISTANT_TEXT';
+  }
+
+  // User 消息
+  if (entry.type === 'user') {
+    const content = entry.message?.content;
+
+    // 纯字符串 content → 真实用户输入
+    if (typeof content === 'string') return 'USER_INPUT';
+
+    if (Array.isArray(content)) {
+      const hasToolResult = content.some((b) => b.type === 'tool_result');
+
+      if (hasToolResult) {
+        // 有 toolUseResult → agent 子任务结果
+        if (entry.toolUseResult) return 'AGENT_RESULT';
+
+        // 有 is_error → 工具错误/权限拒绝
+        const hasError = content.some(
+          (b) => b.type === 'tool_result' && (b as ToolResultBlock).is_error
+        );
+        if (hasError) return 'TOOL_ERROR';
+
+        return 'TOOL_RESULT';
+      }
+
+      // 检查 /model 等斜杠命令
+      const textContent = content
+        .filter((b): b is TextBlock => b.type === 'text')
+        .map((b) => b.text)
+        .join('');
+      if (textContent.trim().startsWith('/')) return 'SLASH_COMMAND';
+
+      // 有图片 → 带图用户输入
+      const hasImage = content.some((b) => b.type === 'image');
+      if (hasImage) return 'USER_INPUT_WITH_IMAGE';
+
+      return 'USER_INPUT';
+    }
+  }
+
+  return 'UNKNOWN';
+}
+
+// ============ 判断是否为真实用户输入 ============
+
+export function isRealUserInput(entry: LogEntry): boolean {
+  const category = entry._category || categorizeEntry(entry);
+  return category === 'USER_INPUT' || category === 'USER_INPUT_WITH_IMAGE';
+}
+
+// ============ 判断是否为用户消息（含工具结果） ============
+
+export function isUserMessage(entry: LogEntry): boolean {
+  return entry.type === 'user';
+}
+
+// ============ 判断是否为工具结果消息 ============
+
+export function isToolResultMessage(entry: LogEntry): boolean {
+  const category = entry._category || categorizeEntry(entry);
+  return category === 'TOOL_RESULT' || category === 'TOOL_ERROR' || category === 'AGENT_RESULT';
+}
+
+// ============ 从用户消息中提取文本内容 ============
+
+export function extractUserText(entry: LogEntry): string {
+  if (!isRealUserInput(entry)) return '';
+
+  const content = entry.message?.content;
+  if (typeof content === 'string') return content;
+
+  if (Array.isArray(content)) {
+    return content
+      .filter((b): b is TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+  }
+
+  return '';
+}
+
+// ============ Token 处理 ============
+
 function sanitizeTokenValue(val: unknown): number {
   const num = typeof val === 'number' ? val : Number(val);
   if (isNaN(num) || num < 0) return 0;
-  // Cap at MAX_TOKEN_VALUE - anything larger is likely a parsing error
   if (num > MAX_TOKEN_VALUE) return 0;
   return num;
 }
 
-// Helper to extract token usage from any nested location in the entry
-function extractTokenUsage(entry: unknown): { inputTokens: number; outputTokens: number; totalTokens: number } | null {
-  // Only extract from assistant messages - this is where token usage should be
-  const entryObj = entry as Record<string, unknown>;
-  if (entryObj.type !== 'assistant') {
+function extractTokenUsage(entry: LogEntry): { inputTokens: number; outputTokens: number; totalTokens: number } | null {
+  if (entry.type !== 'assistant') {
     return null;
   }
 
-  // Try common locations for token usage
-  const message = entryObj.message as Record<string, unknown> | undefined;
-  const locations = [
-    message?.usage,
-    entryObj.usage,
-  ];
+  const usage = entry.message?.usage;
+  if (!usage) return null;
 
-  for (const usage of locations) {
-    if (usage && typeof usage === 'object') {
-      const usageObj = usage as Record<string, unknown>;
-      const inputTokens = sanitizeTokenValue(
-        usageObj.input_tokens ?? usageObj.inputTokens ?? usageObj.input ?? 0
-      );
-      const outputTokens = sanitizeTokenValue(
-        usageObj.output_tokens ?? usageObj.outputTokens ?? usageObj.output ?? 0
-      );
-      const totalTokens = sanitizeTokenValue(
-        usageObj.total_tokens ?? usageObj.totalTokens ?? usageObj.total ?? (inputTokens + outputTokens)
-      );
+  const inputTokens = sanitizeTokenValue(usage.input_tokens);
+  const outputTokens = sanitizeTokenValue(usage.output_tokens);
+  const totalTokens = sanitizeTokenValue(
+    (usage as any).total_tokens ?? (inputTokens + outputTokens)
+  );
 
-      if (inputTokens > 0 || outputTokens > 0) {
-        return {
-          inputTokens,
-          outputTokens,
-          totalTokens: totalTokens > 0 ? totalTokens : inputTokens + outputTokens,
-        };
-      }
-    }
+  if (inputTokens > 0 || outputTokens > 0) {
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens: totalTokens > 0 ? totalTokens : inputTokens + outputTokens,
+    };
   }
 
   return null;
 }
 
-// Helper to get a valid timestamp from an entry
-function getTimestamp(entry: Record<string, unknown>): number {
-  const ts = entry.timestamp || entry.time || entry.created_at || entry.created;
+function getTimestamp(entry: LogEntry): number {
+  const ts = entry.timestamp;
   if (!ts) return NaN;
-
-  if (typeof ts === 'number') return ts;
-  if (typeof ts === 'string') return new Date(ts).getTime();
-  return NaN;
+  return new Date(ts).getTime();
 }
 
-function extractToolUseFromContent(contentItem: MessageContent): { id: string; name: string; input: unknown } | null {
-  if (contentItem && (contentItem.type === 'tool_use' || contentItem.tool_use)) {
-    const toolUse = contentItem.tool_use || contentItem;
-    if (toolUse && typeof toolUse === 'object') {
-      const toolUseObj = toolUse as Record<string, unknown>;
-      return {
-        id: String(toolUseObj.id || toolUseObj.tool_use_id || Math.random().toString()),
-        name: String(toolUseObj.name || toolUseObj.tool_name || 'unknown'),
-        input: toolUseObj.input || toolUseObj.tool_input || {},
-      };
-    }
+// ============ 工具调用处理 ============
+
+function extractToolUseFromContent(contentItem: ContentBlock): { id: string; name: string; input: unknown } | null {
+  if (contentItem.type === 'tool_use') {
+    const toolUse = contentItem as ToolUseBlock;
+    return {
+      id: toolUse.id,
+      name: toolUse.name,
+      input: toolUse.input,
+    };
   }
   return null;
 }
 
-function processToolResult(contentItem: MessageContent): { toolUseId: string; content: unknown; isError: boolean } | null {
-  if (contentItem && (contentItem.type === 'tool_result' || contentItem.tool_result)) {
-    const result = contentItem.tool_result || contentItem;
-    if (result && typeof result === 'object') {
-      const resultObj = result as Record<string, unknown>;
-      return {
-        toolUseId: String(resultObj.tool_use_id || resultObj.id || ''),
-        content: resultObj.content || resultObj.output || result,
-        isError: Boolean(resultObj.is_error || resultObj.error || false),
-      };
-    }
+function processToolResult(contentItem: ContentBlock): { toolUseId: string; content: unknown; isError: boolean } | null {
+  if (contentItem.type === 'tool_result') {
+    const result = contentItem as ToolResultBlock;
+    return {
+      toolUseId: result.tool_use_id,
+      content: result.content,
+      isError: Boolean(result.is_error),
+    };
   }
   return null;
 }
+
+// ============ 主解析函数 ============
 
 export function parseLog(content: string): ParseResult {
-  const lines = content.split('\n').filter(line => line.trim());
+  const lines = content.split('\n').filter((line) => line.trim());
   const entries: LogEntry[] = [];
   const toolCalls: ToolCall[] = [];
   const tokenUsage: ParsedLogData['tokenUsage'] = [];
@@ -122,82 +213,81 @@ export function parseLog(content: string): ParseResult {
   lines.forEach((line, lineIndex) => {
     try {
       const entry = JSON.parse(line) as LogEntry;
-      entries.push(entry);
-      const entryObj = entry as unknown as Record<string, unknown>;
 
-      // Collect valid timestamps
-      const ts = getTimestamp(entryObj);
+      // 添加分类
+      entry._category = categorizeEntry(entry);
+
+      entries.push(entry);
+
+      // 收集有效时间戳
+      const ts = getTimestamp(entry);
       if (!isNaN(ts)) {
         validTimestamps.push(ts);
       }
 
-      // Try to extract token usage from this entry
+      // 尝试提取 token 使用量
       const usage = extractTokenUsage(entry);
       if (usage) {
         tokenUsage.push({
-          timestamp: entry.timestamp || new Date().toISOString(),
+          timestamp: entry.timestamp,
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           totalTokens: usage.totalTokens,
         });
       }
 
-      // Process assistant messages for tool calls
+      // 处理 assistant 消息中的工具调用
       if (entry.type === 'assistant' && entry.message) {
-        const msg = entry.message;
-        const contentArray = msg.content || msg;
-        if (Array.isArray(contentArray)) {
-          contentArray.forEach((contentItem: unknown) => {
-            const toolUse = extractToolUseFromContent(contentItem as MessageContent);
-            if (toolUse) {
-              const toolCall: ToolCall = {
-                id: toolUse.id,
-                name: toolUse.name,
-                input: toolUse.input,
-                timestamp: entry.timestamp || new Date().toISOString(),
-              };
-              pendingToolCalls.set(toolCall.id, toolCall);
-            }
-          });
-        }
+        const content = entry.message.content;
+        const contentArray = Array.isArray(content) ? content : [];
+
+        contentArray.forEach((contentItem) => {
+          const toolUse = extractToolUseFromContent(contentItem);
+          if (toolUse) {
+            const toolCall: ToolCall = {
+              id: toolUse.id,
+              name: toolUse.name,
+              input: toolUse.input,
+              timestamp: entry.timestamp,
+            };
+            pendingToolCalls.set(toolCall.id, toolCall);
+          }
+        });
       }
 
-      // Process user messages for tool results
+      // 处理 user 消息中的工具结果
       if (entry.type === 'user' && entry.message) {
-        const msg = entry.message;
-        const contentArray = msg.content || msg;
-        if (Array.isArray(contentArray)) {
-          contentArray.forEach((contentItem: unknown) => {
-            const result = processToolResult(contentItem as MessageContent);
-            if (result && result.toolUseId) {
-              const toolCall = pendingToolCalls.get(result.toolUseId);
-              if (toolCall) {
-                toolCall.result = result.content;
-                toolCall.isError = result.isError;
-                toolCalls.push(toolCall);
-                pendingToolCalls.delete(result.toolUseId);
-              }
+        const content = entry.message.content;
+        const contentArray = Array.isArray(content) ? content : [];
+
+        contentArray.forEach((contentItem) => {
+          const result = processToolResult(contentItem);
+          if (result && result.toolUseId) {
+            const toolCall = pendingToolCalls.get(result.toolUseId);
+            if (toolCall) {
+              toolCall.result = result.content;
+              toolCall.isError = result.isError;
+              toolCalls.push(toolCall);
+              pendingToolCalls.delete(result.toolUseId);
             }
-          });
-        }
+          }
+        });
       }
 
-      // Process system turn duration
+      // 处理系统 turn duration
       if (entry.type === 'system' && (entry.subtype === 'turn_duration' || entry.durationMs)) {
-        const entryRecord = entry as unknown as Record<string, unknown>;
         turnDurations.push({
-          timestamp: entry.timestamp || new Date().toISOString(),
-          durationMs: entry.durationMs || (entryRecord.duration as number) || 0,
+          timestamp: entry.timestamp,
+          durationMs: entry.durationMs || 0,
           messageCount: entry.messageCount || 0,
         });
       }
 
-      // Process file history snapshots
+      // 处理文件历史快照
       if (entry.type === 'file-history-snapshot' || entry.snapshot) {
-        const entryRecord = entry as unknown as Record<string, unknown>;
         fileHistory.push({
-          timestamp: entry.timestamp || new Date().toISOString(),
-          messageId: entry.uuid || (entryRecord.messageId as string) || '',
+          timestamp: entry.timestamp,
+          messageId: entry.uuid || '',
           files: (entry.snapshot?.trackedFileBackups || entry.snapshot || {}) as Record<string, unknown>,
         });
       }
@@ -212,7 +302,7 @@ export function parseLog(content: string): ParseResult {
     }
   });
 
-  // Add any remaining pending tool calls
+  // 添加剩余的待处理工具调用
   toolCalls.push(...pendingToolCalls.values());
 
   const stats = calculateStats(entries, tokenUsage, toolCalls, turnDurations, fileHistory, validTimestamps);
@@ -230,6 +320,8 @@ export function parseLog(content: string): ParseResult {
   };
 }
 
+// ============ 统计计算 ============
+
 function calculateStats(
   entries: LogEntry[],
   tokenUsage: ParsedLogData['tokenUsage'],
@@ -238,15 +330,14 @@ function calculateStats(
   fileHistory: ParsedLogData['fileHistory'],
   validTimestamps: number[]
 ): SessionStats {
-  const userMessages = entries.filter(e => e.type === 'user' && !e.isMeta).length;
-  const assistantMessages = entries.filter(e => e.type === 'assistant').length;
+  const userMessages = entries.filter((e) => isRealUserInput(e)).length;
+  const assistantMessages = entries.filter((e) => e.type === 'assistant').length;
 
-  // Calculate token totals - make sure to handle cases where totalTokens isn't provided
   let totalTokens = 0;
   let inputTokens = 0;
   let outputTokens = 0;
 
-  tokenUsage.forEach(t => {
+  tokenUsage.forEach((t) => {
     const inTok = t.inputTokens || 0;
     const outTok = t.outputTokens || 0;
     const totTok = t.totalTokens || (inTok + outTok);
@@ -256,7 +347,6 @@ function calculateStats(
     totalTokens += totTok;
   });
 
-  // Calculate session duration from valid timestamps
   let sessionDuration = 0;
   if (validTimestamps.length >= 2) {
     const firstTime = Math.min(...validTimestamps);
@@ -264,11 +354,9 @@ function calculateStats(
     sessionDuration = lastTime - firstTime;
   }
 
-  // Get unique models
   const modelsUsed = new Set<string>();
-  entries.forEach(entry => {
-    const entryRecord = entry as unknown as Record<string, unknown>;
-    const model = entry.message?.model || entryRecord.model;
+  entries.forEach((entry) => {
+    const model = entry.message?.model;
     if (model) {
       modelsUsed.add(String(model));
     }
@@ -287,6 +375,8 @@ function calculateStats(
     modelsUsed: Array.from(modelsUsed),
   };
 }
+
+// ============ 格式化函数 ============
 
 export function formatDuration(ms: number): string {
   if (isNaN(ms) || ms <= 0) return '0m 0s';

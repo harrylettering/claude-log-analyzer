@@ -57,10 +57,10 @@ export function getMessagePreview(entry: LogEntry): string {
       if (Array.isArray(msg.content)) {
         const first = msg.content[0];
         if (first) {
-          if (first.type === 'text' && first.text) {
-            return first.text.substring(0, MESSAGE_PREVIEW_LENGTH);
+          if (first.type === 'text' && 'text' in first) {
+            return (first.text as string).substring(0, MESSAGE_PREVIEW_LENGTH);
           }
-          if (first.type === 'tool_use') {
+          if (first.type === 'tool_use' && 'name' in first) {
             return `工具调用: ${first.name}`;
           }
           if (first.type === 'tool_result') {

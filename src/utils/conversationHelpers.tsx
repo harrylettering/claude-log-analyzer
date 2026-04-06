@@ -43,8 +43,8 @@ export function getMessagePreview(entry: LogEntry): string {
       }
       if (Array.isArray(msg.content)) {
         const first = msg.content[0];
-        if (first?.type === 'text') return first.text?.substring(0, CONVERSATION_PREVIEW_LENGTH) || '';
-        if (first?.type === 'tool_use') return `工具: ${first.name}`;
+        if (first?.type === 'text' && 'text' in first) return (first.text as string)?.substring(0, CONVERSATION_PREVIEW_LENGTH) || '';
+        if (first?.type === 'tool_use' && 'name' in first) return `工具: ${first.name}`;
         if (first?.type === 'tool_result') return '工具结果';
         if (first?.type === 'thinking') return '思考中...';
       }

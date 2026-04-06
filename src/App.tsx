@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { BarChart2, MessageSquare, Clock, Wrench, Zap, FileText, Upload, History, Download, Bug, AlertCircle, Loader2, Brain, GitMerge } from 'lucide-react'
+import { BarChart2, MessageSquare, Clock, Wrench, Zap, FileText, Upload, History, Download, Bug, AlertCircle, Loader2, Brain, GitMerge, TrendingUp, Settings, PlayCircle, Sparkles, Layers } from 'lucide-react'
 import { parseLog } from './utils/logParser'
 import type { ParsedLogData } from './types/log'
 import { FileUpload } from './components/FileUpload'
@@ -15,13 +15,23 @@ import { ExportPanel } from './components/ExportPanel'
 import { DebugPanel } from './components/DebugPanel'
 import { AIAnalysis } from './components/AIAnalysis'
 import { SessionCompare } from './components/SessionCompare'
+import { SessionAggregate } from './components/SessionAggregate'
+import { SessionReplay } from './components/SessionReplay'
+import { BudgetSettings } from './components/BudgetSettings'
+import { PromptOptimizer } from './components/PromptOptimizer'
+import { SessionPatternLibrary } from './components/SessionPatternLibrary'
+import { useBudgetContext } from './contexts/BudgetContext'
 
-type ViewId = 'overview' | 'tokens' | 'timeline' | 'conversation' | 'tools' | 'performance' | 'realtime' | 'history' | 'export' | 'debug' | 'ai-analysis' | 'compare'
+type ViewId = 'overview' | 'tokens' | 'timeline' | 'conversation' | 'tools' | 'performance' | 'realtime' | 'history' | 'export' | 'debug' | 'ai-analysis' | 'compare' | 'aggregate' | 'replay' | 'prompt-optimizer' | 'pattern-library'
 
 const navItems: { id: ViewId; label: string; icon: React.ReactNode }[] = [
   { id: 'overview', label: '会话概览', icon: <BarChart2 className="w-4 h-4" /> },
   { id: 'ai-analysis', label: 'AI 分析', icon: <Brain className="w-4 h-4" /> },
+  { id: 'prompt-optimizer', label: '提示词优化', icon: <Sparkles className="w-4 h-4" /> },
+  { id: 'pattern-library', label: '模式库', icon: <Layers className="w-4 h-4" /> },
   { id: 'compare', label: '会话对比', icon: <GitMerge className="w-4 h-4" /> },
+  { id: 'aggregate', label: '多会话聚合', icon: <TrendingUp className="w-4 h-4" /> },
+  { id: 'replay', label: '会话回放', icon: <PlayCircle className="w-4 h-4" /> },
   { id: 'tokens', label: 'Token 统计', icon: <Zap className="w-4 h-4" /> },
   { id: 'timeline', label: '时间轴', icon: <Clock className="w-4 h-4" /> },
   { id: 'conversation', label: '对话流程', icon: <MessageSquare className="w-4 h-4" /> },
@@ -39,6 +49,15 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [parseWarnings, setParseWarnings] = useState<string[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  const [showBudgetSettings, setShowBudgetSettings] = useState(false)
+  const [replayStartIndex, setReplayStartIndex] = useState<number>(0)
+  const { config, setConfig, resetConfig } = useBudgetContext()
+
+  // 从指定位置开始回放
+  const startReplayFrom = useCallback((index: number) => {
+    setReplayStartIndex(index)
+    setCurrentView('replay')
+  }, [])
 
   const handleFileLoad = useCallback((content: string) => {
     setIsLoading(true)
@@ -71,12 +90,31 @@ export default function App() {
     if (currentView === 'compare') {
       return <SessionCompare defaultSession={logData || undefined} />
     }
+    if (currentView === 'aggregate') {
+      return <SessionAggregate defaultSession={logData || undefined} />
+    }
+    if (currentView === 'replay') {
+      if (!logData) return null;
+      return <SessionReplay data={logData} startIndex={replayStartIndex} />
+    }
+    if (currentView === 'prompt-optimizer') {
+      if (!logData) return null;
+      return <PromptOptimizer data={logData} />
+    }
+    if (currentView === 'pattern-library') {
+      return (
+        <SessionPatternLibrary
+          currentSessionData={logData || undefined}
+          currentSessionName="当前会话"
+        />
+      )
+    }
     if (!logData) return null
     switch (currentView) {
       case 'overview': return <SessionOverview data={logData} />
       case 'ai-analysis': return <AIAnalysis data={logData} />
       case 'tokens': return <TokenDashboard data={logData} />
-      case 'timeline': return <TimelineView data={logData} />
+      case 'timeline': return <TimelineView data={logData} onStartReplay={startReplayFrom} />
       case 'conversation': return <ConversationFlow data={logData} />
       case 'tools': return <ToolAnalysis data={logData} />
       case 'performance': return <PerformanceView data={logData} />
@@ -98,6 +136,13 @@ export default function App() {
           <h1 className="text-lg font-bold">Claude Log Visualizer</h1>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowBudgetSettings(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm border transition-colors border-slate-600 hover:bg-slate-700"
+          >
+            <Settings className="w-4 h-4" />
+            预算设置
+          </button>
           {!logData && (
             <div className="w-48">
               <FileUpload onFileLoad={handleFileLoad} isDark={true} disabled={isLoading} />
@@ -117,12 +162,12 @@ export default function App() {
 
       <div className="flex">
         {/* Sidebar */}
-        {(logData || currentView === 'compare') && (
+        {(logData || currentView === 'compare' || currentView === 'aggregate' || currentView === 'replay') && (
           <aside className="w-48 border-r min-h-screen p-3 border-slate-700 bg-slate-800/30">
             <nav className="space-y-1">
               {navItems.map(item => {
-                // 如果没有加载日志，只显示会话对比
-                if (!logData && item.id !== 'compare') return null;
+                // 如果没有加载日志，只显示会话对比和多会话聚合
+                if (!logData && item.id !== 'compare' && item.id !== 'aggregate') return null;
                 return (
                   <button
                     key={item.id}
@@ -195,6 +240,15 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* 预算设置弹窗 */}
+      <BudgetSettings
+        isOpen={showBudgetSettings}
+        onClose={() => setShowBudgetSettings(false)}
+        config={config}
+        onSave={setConfig}
+        onReset={resetConfig}
+      />
     </div>
   )
 }

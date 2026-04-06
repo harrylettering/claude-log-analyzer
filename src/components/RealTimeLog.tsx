@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Pause, Download, FileText } from 'lucide-react';
-import type { ParsedLogData, LogEntry } from '../types/log';
-import { parseLog } from '../utils/logParser';
+import type { ParsedLogData, LogEntry, EntryCategory } from '../types/log';
+import { parseLog, categorizeEntry } from '../utils/logParser';
 import { filterEntries } from '../utils/searchFilter';
 import type { SearchFilters } from '../types/search';
 import { DEFAULT_FILTERS } from '../types/search';
@@ -51,6 +51,25 @@ export function RealTimeLog({ data, onDataUpdate }: RealTimeLogProps) {
       case 'system': return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
       case 'file-history-snapshot': return 'bg-amber-500/20 text-amber-400 border-amber-500/30';
       default: return 'bg-slate-500/20 text-slate-400 border-slate-500/30';
+    }
+  };
+
+  const getCategoryInfo = (category: EntryCategory): { label: string; color: string } => {
+    switch (category) {
+      case 'USER_INPUT': return { label: '用户输入', color: 'bg-green-500/20 text-green-400 border-green-500/30' };
+      case 'USER_INPUT_WITH_IMAGE': return { label: '用户输入(图片)', color: 'bg-green-500/20 text-green-400 border-green-500/30' };
+      case 'SLASH_COMMAND': return { label: '斜杠命令', color: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30' };
+      case 'TOOL_RESULT': return { label: '工具结果', color: 'bg-amber-500/20 text-amber-400 border-amber-500/30' };
+      case 'TOOL_ERROR': return { label: '工具错误', color: 'bg-red-500/20 text-red-400 border-red-500/30' };
+      case 'AGENT_RESULT': return { label: 'Agent结果', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' };
+      case 'ASSISTANT_TEXT': return { label: '助手回复', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' };
+      case 'ASSISTANT_TOOL_CALL': return { label: '助手工具调用', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' };
+      case 'ASSISTANT_THINKING_RESPONSE': return { label: '思考+回复', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' };
+      case 'SYSTEM': return { label: '系统消息', color: 'bg-gray-500/20 text-gray-400 border-gray-500/30' };
+      case 'SUMMARY': return { label: '会话摘要', color: 'bg-gray-500/20 text-gray-400 border-gray-500/30' };
+      case 'FILE_HISTORY': return { label: '文件快照', color: 'bg-amber-500/20 text-amber-400 border-amber-500/30' };
+      case 'UNKNOWN':
+      default: return { label: '未知', color: 'bg-slate-500/20 text-slate-400 border-slate-500/30' };
     }
   };
 
@@ -138,10 +157,19 @@ export function RealTimeLog({ data, onDataUpdate }: RealTimeLogProps) {
             filteredEntries.map((entry, index) => (
               <div key={entry.uuid || index} className="bg-slate-900/50 rounded-lg border border-slate-700 overflow-hidden">
                 <div className="flex items-center justify-between px-4 py-2 bg-slate-800/50 border-b border-slate-700">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className={`px-2 py-0.5 text-xs rounded border ${getEntryBadgeColor(entry.type)}`}>
                       {entry.type}
                     </span>
+                    {(() => {
+                      const category = entry._category || categorizeEntry(entry);
+                      const categoryInfo = getCategoryInfo(category);
+                      return (
+                        <span className={`px-2 py-0.5 text-xs rounded border ${categoryInfo.color}`}>
+                          {categoryInfo.label}
+                        </span>
+                      );
+                    })()}
                     {entry.isSidechain && (
                       <span className="px-2 py-0.5 bg-amber-500/20 text-amber-400 text-xs rounded border border-amber-500/30">
                         Sidechain
