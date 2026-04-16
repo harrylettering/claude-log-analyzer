@@ -1,5 +1,0 @@
-{"type":"user","timestamp":"2026-04-11T10:00:00.000Z","message":{"content":"Hello, can you help me?"}}
-{"type":"assistant","timestamp":"2026-04-11T10:00:01.000Z","message":{"content":[{"type":"text","text":"Hello! How can I assist you today?"}]}}
-{"type":"assistant","timestamp":"2026-04-11T10:00:02.000Z","message":{"content":[{"type":"tool_use","id":"tool1","name":"bash","input":{"command":"ls -la"}},{"type":"text","text":"Let me check the directory."}]}}
-{"type":"tool_result","timestamp":"2026-04-11T10:00:03.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"tool1","content":"total 12\ndrwxr-xr-x  8 harry staff  256 Apr 10 10:00 .\ndr-xr-x  8 harry staff  256 Apr 11 10:00 .."}]}}
-{"type":"assistant","timestamp":"2026-04-11T10:00:04.000Z","message":{"content":[{"type":"text","text":"I can see the directory contents."}]}}
