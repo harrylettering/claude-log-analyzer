@@ -61,8 +61,8 @@ If you use Claude Code seriously, this helps you move from "I have a log file" t
 
 ## Demo
 
-- Overview video: [claude-log-analyzer-github.mp4](docs/screenshots/claude-log-analyzer-github.mp4)
-- Full demo clip: [claude-log-analyzer.mp4](docs/screenshots/claude-log-analyzer.mp4)
+- Demo video: [GitHub Demo Asset](https://github.com/user-attachments/assets/be7374a6-5f6a-4c87-95f5-defe3974f6ea)
+- Local full demo clip: [claude-log-analyzer.mp4](docs/screenshots/claude-log-analyzer.mp4)
 
 ## Screenshots
 
