@@ -1,4 +1,4 @@
-Claude Code Local Agent Observability Dashboard - Requirements and Architecture
+Claude Trace Replay - Observability Requirements and Architecture
 
 1. Positioning and Background
 
@@ -15,7 +15,7 @@ run command -> receive error -> change code blindly -> run command again -> rece
 Pain point 3: Lost context
 Plain terminal output is hard to review when trying to understand the agent's reasoning path, file reads, file edits, and diffs.
 
-Claude Log Analyzer is designed as a local-first, low-friction observability dashboard for Claude Code sessions.
+Claude Trace Replay is designed as a local-first, low-friction observability dashboard for Claude Code sessions.
 It parses local logs and turns them into timelines, diffs, token insights, and agent-flow visualizations.
 
 2. Core Architecture: Pluggable Parser System

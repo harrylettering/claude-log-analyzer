@@ -177,7 +177,7 @@ export default function App() {
             <Activity className="w-3 h-3" /> Live Discovery
           </div>
           <h2 className="text-4xl font-black text-white tracking-tighter italic">
-            CLAUDE<span className="text-blue-500">OBSERVER</span>
+            CLAUDE<span className="text-blue-500">TRACE REPLAY</span>
           </h2>
           <p className="text-slate-400 text-lg">Automatically discover active sessions from the last 24 hours, or enter a path manually.</p>
         </div>
@@ -330,7 +330,7 @@ export default function App() {
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center shadow-lg shadow-blue-900/20">
             <Activity className="w-5 h-5 text-white" />
           </div>
-          <h1 className="text-lg font-black tracking-tight">Claude Observer</h1>
+          <h1 className="text-lg font-black tracking-tight">Claude Trace Replay</h1>
           {isWsConnected ? (
             <div className="flex items-center gap-2 ml-4 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20">
               <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />

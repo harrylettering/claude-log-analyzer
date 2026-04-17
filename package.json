@@ -1,25 +1,25 @@
 {
-  "name": "claude-log-analyzer",
+  "name": "claude-trace-replay",
   "private": true,
   "version": "0.1.0",
-  "description": "Visual analytics dashboard for Claude Code JSONL logs, including timelines, token usage, agent-flow replay, prompt analysis, and session comparison.",
+  "description": "Trace replay and visual analytics dashboard for Claude Code JSONL traces, including timelines, token usage, agent-flow replay, prompt analysis, and session comparison.",
   "type": "module",
   "license": "MIT",
   "author": "Harli Hao",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/harrylettering/claude-log-analyzer.git"
+    "url": "git+https://github.com/harrylettering/claude-trace-replay.git"
   },
   "bugs": {
-    "url": "https://github.com/harrylettering/claude-log-analyzer/issues"
+    "url": "https://github.com/harrylettering/claude-trace-replay/issues"
   },
-  "homepage": "https://github.com/harrylettering/claude-log-analyzer#readme",
+  "homepage": "https://github.com/harrylettering/claude-trace-replay#readme",
   "keywords": [
     "claude-code",
     "claude",
     "ai-coding",
     "jsonl",
-    "log-analysis",
+    "trace-replay",
     "developer-tools",
     "agent-visualization",
     "react",

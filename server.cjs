@@ -285,6 +285,19 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+app.get('/', (_req, res) => {
+    res.json({
+        name: 'Claude Trace Replay backend',
+        status: 'ok',
+        websocket: 'ws://localhost:4000',
+        frontend: 'http://localhost:3000'
+    });
+});
+
+app.get('/health', (_req, res) => {
+    res.json({ status: 'ok' });
+});
+
 wss.on('connection', (ws) => {
     const watcher = new LogFileWatcher(ws);
 

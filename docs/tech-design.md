@@ -1,6 +1,6 @@
 # Agent Flow Technical Design
 
-This document summarizes the Agent Flow module architecture used by Claude Log Analyzer.
+This document summarizes the Agent Flow module architecture used by Claude Trace Replay.
 The goal of Agent Flow is to make a Claude Code session understandable as a call-and-return workflow: who called whom, which tool ran, what happened, and how control returned to the main agent.
 
 ## Goals
@@ -19,7 +19,7 @@ ParsedLogData
     |
     v
 CanvasBuilder
-    |-- normalize log entries
+    |-- normalize trace entries
     |-- extract virtual events
     |-- build nodes and edges
     |-- attach action summaries
@@ -45,11 +45,11 @@ Replay Controls
 
 ## Data Model
 
-Agent Flow separates log structure from visual structure.
+Agent Flow separates trace structure from visual structure.
 
 ### Virtual Events
 
-Virtual events represent ordered semantic steps extracted from Claude Code logs.
+Virtual events represent ordered semantic steps extracted from Claude Code traces.
 They are derived from JSONL entries, message roles, and content blocks such as `text`, `thinking`, `tool_use`, and `tool_result`.
 
 Typical step types include:
@@ -216,12 +216,12 @@ Tool placement uses call order and category hints so tools from the same local w
 | Large sessions can produce many nodes and edges | Visual clutter and lower frame rate | Scene-based rendering and deterministic clustering |
 | Edge endpoints can look imprecise on custom shapes | Lower visual trust | Shape-aware anchor calculation and conservative edge offsets |
 | Tool outputs can be very large | UI noise and performance cost | Summary-only rendering |
-| Log schemas may evolve | Missed steps or incorrect labels | Keep parser logic block-aware and tolerant of unknown content types |
+| Trace schemas may evolve | Missed steps or incorrect labels | Keep parser logic block-aware and tolerant of unknown content types |
 
 ## Future Improvements
 
 - Add a short README hero GIF for Agent Flow playback.
-- Add sample anonymized JSONL logs for demos and regression testing.
+- Add sample anonymized JSONL traces for demos and regression testing.
 - Add parser fixtures for `tool_use`, `tool_result`, and mixed content blocks.
 - Add visual regression screenshots for dense tool sessions.
 - Add more layout modes for very large sessions.

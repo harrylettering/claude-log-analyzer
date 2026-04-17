@@ -1,6 +1,6 @@
 // Lightweight IndexedDB wrapper for large Base64 screenshots to avoid bloating the React state tree.
 
-const DB_NAME = 'ClaudeObserverDB';
+const DB_NAME = 'ClaudeTraceReplayDB';
 const STORE_NAME = 'images';
 const DB_VERSION = 1;
 

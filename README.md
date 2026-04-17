@@ -1,21 +1,23 @@
-# Claude Log Analyzer
+# Claude Trace Replay
 
 <p align="center">
-  <strong>Turn raw Claude Code logs into something you can actually understand.</strong>
+  <strong>Replay Claude Code traces and understand what actually happened.</strong>
 </p>
 
 <p align="center">
-  Replay agent behavior, inspect tool calls, spot token spikes, compare sessions, and figure out why an AI coding run went great or sideways.
+  Turn raw Claude Code JSONL traces into a replayable workspace for agent behavior, tool calls, token spikes, session comparison, and post-run analysis.
 </p>
 
 <p align="center">
-  <a href="https://github.com/harrylettering/claude-log-analyzer/stargazers">Star on GitHub</a>
+  <a href="https://github.com/harrylettering/claude-trace-replay/stargazers">Star on GitHub</a>
   ·
   <a href="#quick-start">Quick Start</a>
   ·
+  <a href="#feature-highlights">Feature Highlights</a>
+  ·
   <a href="#screenshots">Screenshots</a>
   ·
-  <a href="#why-people-star-this">Why People Star This</a>
+  <a href="#who-its-for">Who It's For</a>
 </p>
 
 <p align="center">
@@ -31,9 +33,9 @@ https://github.com/user-attachments/assets/be7374a6-5f6a-4c87-95f5-defe3974f6ea
 
 ## Why People Star This
 
-Most Claude Code session logs are technically rich and visually painful.
+Most Claude Code traces are technically rich and visually painful.
 
-This project turns `.jsonl` logs into a visual debugging and review workspace so you can:
+Claude Trace Replay turns `.jsonl` session data into a visual replay and review workspace so you can:
 
 - See what the agent actually did, in order
 - Understand which tool calls consumed time and tokens
@@ -41,9 +43,9 @@ This project turns `.jsonl` logs into a visual debugging and review workspace so
 - Compare two sessions to learn what changed
 - Review prompt quality and collaboration patterns after a run
 
-If you use Claude Code seriously, this helps you move from "I have a log file" to "I know what happened."
+If you use Claude Code seriously, this helps you move from "I captured a trace" to "I know what happened."
 
-## What Makes It Useful
+## Feature Highlights
 
 - **Agent Flow Replay**: watch the call graph animate step by step around the main agent
 - **Current Step Context**: inspect what is happening right now, not just the final output
@@ -53,15 +55,12 @@ If you use Claude Code seriously, this helps you move from "I have a log file" t
 - **AI Retrospective**: surface strengths, weaknesses, and next-step improvements
 - **Prompt Review**: inspect prompt and collaboration quality after the fact
 
-## Built For
+## Who It's For
 
 - Developers debugging noisy Claude Code sessions
 - People reviewing long agent runs with many tools
 - Teams trying to understand why one prompt or workflow worked better than another
 - Anyone who wants to learn from real AI coding traces instead of guessing
-
-
-
 ## Screenshots
 
 ### Session Intelligence
@@ -94,8 +93,8 @@ If you use Claude Code seriously, this helps you move from "I have a log file" t
 ### Install
 
 ```bash
-git clone https://github.com/harrylettering/claude-log-analyzer.git
-cd claude-log-analyzer
+git clone https://github.com/harrylettering/claude-trace-replay.git
+cd claude-trace-replay
 npm install
 ```
 
@@ -119,14 +118,14 @@ npm run build
 npm run preview
 ```
 
-## In 30 Seconds
+## First Run
 
 1. Open the app locally.
-2. Load a Claude Code `.jsonl` log.
+2. Load a Claude Code `.jsonl` trace.
 3. Jump between timeline, token, flow, compare, and analysis views.
 4. Find the exact step where the run slowed down, got noisy, or went off track.
 
-## Main Views
+## Workspace Views
 
 | View | What You Learn |
 | --- | --- |
@@ -138,11 +137,11 @@ npm run preview
 | AI Analysis | Retrospective insights and suggested improvements |
 | Prompt Optimizer | Prompt quality review and collaboration guidance |
 | Session Compare | What changed between two runs |
-| Real-Time Log | Raw event stream inspection |
+| Real-Time Log | Raw event stream and trace inspection |
 
 ## Why It Exists
 
-Claude Code sessions can become long, tool-heavy, and hard to audit from raw logs alone.
+Claude Code sessions can become long, tool-heavy, and hard to audit from raw trace data alone.
 
 This project exists to make those sessions reviewable:
 
@@ -152,9 +151,9 @@ This project exists to make those sessions reviewable:
 - for agent workflow learning
 - for sharing and comparing runs with others
 
-## Supported Log Data
+## Supported Trace Data
 
-Claude Log Analyzer is built around Claude Code `.jsonl` session logs.
+Claude Trace Replay is built around Claude Code `.jsonl` session traces.
 
 Typical entry types include:
 
@@ -191,14 +190,14 @@ Common fields used by the parser include:
 ## Project Structure
 
 ```text
-claude-log-analyzer/
+claude-trace-replay/
 ├── docs/
 │   └── screenshots/          # README media and product visuals
 ├── src/
 │   ├── components/           # Dashboards and visualization UI
 │   ├── hooks/                # Playback and interaction hooks
 │   ├── types/                # Domain types
-│   ├── utils/                # Parsing, analysis, and helper logic
+│   ├── utils/                # Trace parsing, analysis, and helper logic
 │   ├── App.tsx               # Application shell
 │   ├── main.tsx              # Entry point
 │   └── index.css             # Global styling
@@ -218,7 +217,7 @@ npm run lint      # Run ESLint
 ## Roadmap
 
 - Ship a stronger README hero with a short looping demo
-- Add anonymized sample logs so first-time users can explore instantly
+- Add anonymized sample traces so first-time users can explore instantly
 - Improve large-session performance and visualization density
 - Add more flow layout modes for complex agent chains
 - Add export presets for reports and retrospectives
@@ -231,7 +230,7 @@ Good contribution areas:
 
 - parser improvements
 - UI polish
-- performance work for large logs
+- performance work for large traces
 - new analysis panels
 - sample datasets and reproducible bug cases
 
