@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Info, FileJson, Brain, Loader2, Zap, ArrowRight, Terminal, RefreshCw } from 'lucide-react';
-import type { ParsedLogData } from '../types/log';
+import type { LogEntry, ParsedLogData } from '../types/log';
 import type { Lesson } from '../utils/rulesExtractor';
 import { extractLessons } from '../utils/rulesExtractor';
 import { ActionCardRenderer } from './AgentActionCards';
@@ -43,11 +43,30 @@ Output language rule:
 
   // Heuristic rule extraction.
   const lessons: Lesson[] = useMemo(() => extractLessons(data.entries), [data.entries]);
+  const errorEntries: LogEntry[] = useMemo(() => {
+    return data.entries.filter((entry) => {
+      const action = entry.parsedAction;
+      return action?.type === 'TaskResult' && Boolean(action.isError);
+    });
+  }, [data.entries]);
 
   // Export the retrospective report.
   const exportRetrospective = () => {
     const timestamp = new Date().toLocaleString('en-US');
-    let content = `# Claude Session Retrospective\n\nGenerated: ${timestamp}\n\n---\n\n## Terminal Analysis Summary\n\n${cliResult || 'No terminal analysis available yet'}\n\n---\n\n## Automatically Extracted Rules\n\n`;
+    let content = `# Claude Session Retrospective\n\nGenerated: ${timestamp}\n\n---\n\n## Terminal Analysis Summary\n\n${cliResult || 'No terminal analysis available yet'}\n\n---\n\n## Error Log\n\n`;
+
+    if (errorEntries.length === 0) {
+      content += 'No failed tool executions were found.\n\n';
+    } else {
+      errorEntries.forEach((entry, index) => {
+        const action = entry.parsedAction;
+        if (!action || action.type !== 'TaskResult') return;
+        content += `### ${index + 1}. ${new Date(entry.timestamp).toLocaleString('en-US')}\n\n`;
+        content += `${action.content}\n\n---\n\n`;
+      });
+    }
+
+    content += `## Automatically Extracted Rules\n\n`;
 
     if (lessons.length === 0) {
       content += 'No rules were extracted.';
@@ -193,17 +212,16 @@ Output language rule:
         {activeTab === 'rules' && (
           <div className="space-y-4 animate-in fade-in duration-500">
             <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Error Log Collection</h3>
-            {lessons.length === 0 ? (
+            {errorEntries.length === 0 ? (
               <div className="py-20 text-center border-2 border-dashed border-slate-800 rounded-3xl bg-slate-900/20">
                 <Info className="w-8 h-8 text-slate-700 mx-auto mb-3" />
                 <p className="text-slate-500 text-sm font-medium px-10">No failed tool executions were found in this session.</p>
               </div>
             ) : (
-              lessons.map((lesson) => (
-                <div key={lesson.id} className="mb-4">
-                  {/* Error card */}
-                  {lesson.entry?.parsedAction && (
-                    <ActionCardRenderer action={lesson.entry.parsedAction} />
+              errorEntries.map((entry) => (
+                <div key={entry.uuid} className="mb-4">
+                  {entry.parsedAction && (
+                    <ActionCardRenderer action={entry.parsedAction} />
                   )}
                 </div>
               ))
@@ -213,7 +231,7 @@ Output language rule:
       </div>
 
       {/* Footer / Export */}
-      {(lessons.length > 0 || cliResult) && (
+      {(errorEntries.length > 0 || lessons.length > 0 || cliResult) && (
         <div className="cyber-card p-4 bg-gradient-to-br from-indigo-600/20 to-blue-700/20 border-indigo-500/30 shadow-xl shadow-indigo-900/20">
           <div className="flex items-center gap-3 mb-2 text-white">
             <FileJson className="w-5 h-5 text-indigo-400" />
