@@ -3,17 +3,21 @@
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 <p align="center">
-  <strong>Replay Claude Code traces and understand what actually happened.</strong>
+  <strong>Open-source trace viewer and observability workspace for Claude Code.</strong>
 </p>
 
 <p align="center">
-  Turn raw Claude Code JSONL traces into a replayable workspace for agent behavior, tool calls, token spikes, session comparison, and post-run analysis.
+  Replay Claude Code <code>.jsonl</code> sessions, inspect agent flows and tool calls, spot token spikes, compare runs, and understand what actually happened.
 </p>
 
 <p align="center">
   <a href="https://github.com/harrylettering/claude-trace-replay/stargazers">Star on GitHub</a>
   ·
+  <a href="#demo">Watch Demo</a>
+  ·
   <a href="#quick-start">Quick Start</a>
+  ·
+  <a href="#use-cases">Use Cases</a>
   ·
   <a href="#feature-highlights">Feature Highlights</a>
   ·
@@ -23,29 +27,56 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white" alt="React 18" />
-  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" alt="TypeScript 5" />
-  <img src="https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white" alt="Vite 5" />
-  <img src="https://img.shields.io/badge/Tailwind-3-06B6D4?logo=tailwindcss&logoColor=white" alt="Tailwind CSS" />
+  <a href="https://github.com/harrylettering/claude-trace-replay/stargazers"><img src="https://img.shields.io/github/stars/harrylettering/claude-trace-replay?style=flat-square" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/Claude%20Code-Traces-black" alt="Claude Code Traces" />
+  <img src="https://img.shields.io/badge/JSONL-Viewer-1f6feb" alt="JSONL Viewer" />
+  <img src="https://img.shields.io/badge/AI%20Agent-Observability-0f766e" alt="AI Agent Observability" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
 </p>
 
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/be7374a6-5f6a-4c87-95f5-defe3974f6ea">
+    <img src="docs/screenshots/session-overview.png" alt="Claude Trace Replay session overview" width="900" />
+  </a>
+</p>
+
+<p align="center">
+  Click the preview to watch the demo.
+</p>
+
+<a id="demo"></a>
+
 ## Demo
+
+Watch the 30-second product demo:
+
 https://github.com/user-attachments/assets/be7374a6-5f6a-4c87-95f5-defe3974f6ea
+
+## Short Pitch
+
+Claude Trace Replay is an open-source Claude Code trace viewer that turns raw `.jsonl` sessions into a replayable workspace for debugging, observability, and prompt iteration.
 
 ## Why People Star This
 
-Most Claude Code traces are technically rich and visually painful.
+Most Claude Code traces are technically rich and visually painful to review.
 
-Claude Trace Replay turns `.jsonl` session data into a visual replay and review workspace so you can:
+Claude Trace Replay turns raw session logs into a visual replay and debugging workspace so you can:
 
 - See what the agent actually did, in order
-- Understand which tool calls consumed time and tokens
+- Understand which tool calls consumed time, tokens, and attention
 - Replay agent-to-tool handoffs instead of reading raw event blocks
-- Compare two sessions to learn what changed
+- Compare two sessions to learn what changed between prompts, models, or workflows
 - Review prompt quality and collaboration patterns after a run
 
 If you use Claude Code seriously, this helps you move from "I captured a trace" to "I know what happened."
+
+## Use Cases
+
+- **Debug noisy agent runs**: find the exact turn where the workflow slowed down, looped, or drifted off-task
+- **Inspect tool behavior**: trace file reads, diffs, terminal commands, and tool results in execution order
+- **Review token usage**: identify expensive turns and sudden spikes before they become routine
+- **Compare prompt or model changes**: see why one Claude Code session performed better than another
+- **Share learnings with a team**: turn raw traces into something people can review together
 
 ## Feature Highlights
 
@@ -87,6 +118,8 @@ If you use Claude Code seriously, this helps you move from "I captured a trace" 
 
 ## Quick Start
 
+Bring your own Claude Code `.jsonl` trace and open it locally in a few minutes.
+
 ### Requirements
 
 - Node.js 18+
@@ -126,6 +159,8 @@ npm run preview
 2. Load a Claude Code `.jsonl` trace.
 3. Jump between timeline, token, flow, compare, and analysis views.
 4. Find the exact step where the run slowed down, got noisy, or went off track.
+
+Tip: if you plan to share the project, recording a short before/after comparison with a real trace usually explains the value faster than static screenshots alone.
 
 ## Workspace Views
 
@@ -218,7 +253,6 @@ npm run lint      # Run ESLint
 
 ## Roadmap
 
-- Ship a stronger README hero with a short looping demo
 - Add anonymized sample traces so first-time users can explore instantly
 - Improve large-session performance and visualization density
 - Add more flow layout modes for complex agent chains
