@@ -436,16 +436,57 @@ function compressLogForAnalysis(filePath) {
     }
 }
 
+// --- Parse session names from history.jsonl ---
+function parseSessionNamesFromHistory() {
+    const sessionNames = new Map(); // sessionId -> { name: string, timestamp: number }
+    const historyPath = path.join(os.homedir(), '.claude', 'history.jsonl');
+    
+    if (!fs.existsSync(historyPath)) {
+        return sessionNames;
+    }
+
+    try {
+        const content = fs.readFileSync(historyPath, 'utf-8');
+        const lines = content.split('\n').filter(line => line.trim());
+        
+        for (const line of lines) {
+            try {
+                const entry = JSON.parse(line);
+                // Check if this is a /rename command
+                if (entry.display && entry.display.startsWith('/rename ') && entry.sessionId) {
+                    const name = entry.display.replace(/^\/rename\s+/, '').trim();
+                    const timestamp = entry.timestamp || 0;
+                    
+                    // Only keep the latest rename for each session
+                    const existing = sessionNames.get(entry.sessionId);
+                    if (!existing || existing.timestamp < timestamp) {
+                        sessionNames.set(entry.sessionId, { name, timestamp });
+                    }
+                }
+            } catch (e) {
+                // Ignore malformed lines
+            }
+        }
+    } catch (e) {
+        console.error('[History] Failed to parse history.jsonl:', e);
+    }
+    
+    return sessionNames;
+}
+
 // --- Discovery scanner with exclusions and full-path output ---
-function getRecentSessions() {
+function getRecentSessions(hours = 24) {
     if (!fs.existsSync(CLAUDE_BASE_DIR)) {
         return [];
     }
     
     const sessions = [];
     const now = Date.now();
-    // Scan the last 24 hours to keep discovery stable while avoiding stale sessions.
-    const SCAN_WINDOW = 24 * 60 * 60 * 1000;
+    // Calculate scan window based on hours parameter (default 24 hours)
+    const SCAN_WINDOW = hours * 60 * 60 * 1000;
+    
+    // Parse session names from history.jsonl
+    const sessionNames = parseSessionNamesFromHistory();
 
     try {
         const projects = fs.readdirSync(CLAUDE_BASE_DIR);
@@ -466,12 +507,17 @@ function getRecentSessions() {
                     const stats = fs.statSync(filePath);
                     // Collect recently active sessions.
                     if (now - stats.mtimeMs <= SCAN_WINDOW) {
+                        // Extract sessionId from filename (remove .jsonl extension)
+                        const sessionId = file.replace(/\.jsonl$/, '');
+                        const renameInfo = sessionNames.get(sessionId);
+                        
                         sessions.push({
                             id: file, // Full filename
                             folderName: project.replace(/^-Users-/, '').replace(/^-Users/, ''), // Strip the -Users prefix
                             fullPath: filePath,
                             lastUpdated: stats.mtime,
-                            size: (stats.size / 1024).toFixed(1) + ' KB'
+                            size: (stats.size / 1024).toFixed(1) + ' KB',
+                            sessionName: renameInfo?.name || null
                         });
                     }
                 } catch (e) {
@@ -579,7 +625,8 @@ wss.on('connection', (ws) => {
         try {
             const { type, data } = JSON.parse(message);
             if (type === 'get-discovery-list') {
-                const list = getRecentSessions();
+                const hours = data?.hours || 24;
+                const list = getRecentSessions(hours);
                 ws.send(JSON.stringify({ type: 'discovery-list', payload: list }));
             } else if (type === 'start-watch') {
                 console.log(`[DEBUG] Received start-watch: ${data.path}`);
@@ -728,6 +775,38 @@ wss.on('connection', (ws) => {
                 } catch (err) {
                     console.error('[DEBUG] Execution Exception:', err);
                     ws.send(JSON.stringify({ type: 'compare-analysis-error', payload: `Execution error: ${err.message}` }));
+                }
+            } else if (type === 'load-session-content') {
+                // Load session content for comparison
+                const { path: sessionPath } = data || {};
+                console.log(`[DEBUG] Received load-session-content request: ${sessionPath}`);
+
+                if (!sessionPath) {
+                    ws.send(JSON.stringify({ type: 'session-content-error', payload: { error: 'No path provided' } }));
+                    return;
+                }
+
+                try {
+                    if (fs.existsSync(sessionPath)) {
+                        const content = fs.readFileSync(sessionPath, 'utf-8');
+                        ws.send(JSON.stringify({
+                            type: 'session-content',
+                            payload: { content, path: sessionPath }
+                        }));
+                        console.log(`[DEBUG] Session content loaded: ${sessionPath}, size: ${content.length} chars`);
+                    } else {
+                        ws.send(JSON.stringify({
+                            type: 'session-content-error',
+                            payload: { error: 'File not found' }
+                        }));
+                        console.error(`[DEBUG] Session file not found: ${sessionPath}`);
+                    }
+                } catch (err) {
+                    console.error('[DEBUG] Failed to load session content:', err);
+                    ws.send(JSON.stringify({
+                        type: 'session-content-error',
+                        payload: { error: err.message }
+                    }));
                 }
             }
         } catch (e) { }
