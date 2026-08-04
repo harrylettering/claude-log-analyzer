@@ -15,12 +15,25 @@ import {
   Sparkles,
   RefreshCw,
   AlertCircle,
+  Terminal,
+  Search,
 } from 'lucide-react';
 import type { ParsedLogData } from '../types/log';
 import { parseLog, formatDuration, formatTokens, compressLogEntries } from '../utils/logParser';
 
+interface DiscoverySession {
+  id: string;
+  fullPath: string;
+  folderName: string;
+  sessionName?: string;
+  size: string;
+  lastUpdated: string;
+}
+
 interface SessionCompareProps {
   defaultSession?: ParsedLogData;
+  discoveryList?: DiscoverySession[];
+  onLoadDiscoverySession?: (path: string) => Promise<string>;
 }
 
 type LoadedSession = {
@@ -91,13 +104,15 @@ function StatCard({
   );
 }
 
-export function SessionCompare({ defaultSession }: SessionCompareProps) {
+export function SessionCompare({ defaultSession, discoveryList, onLoadDiscoverySession }: SessionCompareProps) {
   const [sessionA, setSessionA] = useState<LoadedSession | null>(
     defaultSession ? { data: defaultSession, name: 'Current Session' } : null
   );
   const [sessionB, setSessionB] = useState<LoadedSession | null>(null);
   const [loadingA, setLoadingA] = useState(false);
   const [loadingB, setLoadingB] = useState(false);
+  const [showSessionSelector, setShowSessionSelector] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState<'a' | 'b' | null>(null);
 
   // AI comparison analysis state.
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -187,6 +202,50 @@ export function SessionCompare({ defaultSession }: SessionCompareProps) {
     setAnalyzeResult('');
     setAnalyzeError(null);
   }, []);
+
+  // Load session from discovery list
+  const handleLoadDiscoverySession = useCallback(async (session: DiscoverySession, slot: 'a' | 'b') => {
+    if (!onLoadDiscoverySession) {
+      alert('Discovery session loading is not available');
+      return;
+    }
+
+    const setLoading = slot === 'a' ? setLoadingA : setLoadingB;
+    const setSession = slot === 'a' ? setSessionA : setSessionB;
+
+    setLoading(true);
+
+    try {
+      const content = await onLoadDiscoverySession(session.fullPath);
+      const result = parseLog(content);
+      setSession({
+        data: result.data,
+        name: session.sessionName || session.folderName || session.id,
+      });
+      setAnalyzeResult('');
+      setAnalyzeError(null);
+    } catch (err) {
+      console.error('Failed to load discovery session:', err);
+      alert('Failed to load session. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }, [onLoadDiscoverySession]);
+
+  // Open session selector
+  const openSessionSelector = useCallback((slot: 'a' | 'b') => {
+    setSelectedSlot(slot);
+    setShowSessionSelector(true);
+  }, []);
+
+  // Handle session selection
+  const handleSelectDiscoverySession = useCallback((session: DiscoverySession) => {
+    if (selectedSlot) {
+      handleLoadDiscoverySession(session, selectedSlot);
+    }
+    setShowSessionSelector(false);
+    setSelectedSlot(null);
+  }, [selectedSlot, handleLoadDiscoverySession]);
 
   // Run AI comparison analysis.
   const runCompareAnalysis = useCallback(() => {
@@ -303,20 +362,36 @@ export function SessionCompare({ defaultSession }: SessionCompareProps) {
               </div>
             </div>
           ) : (
-            <button
-              onClick={() => handleLoadSession('b')}
-              disabled={loadingB}
-              className="w-full py-8 border-2 border-dashed border-slate-600 rounded-lg hover:border-purple-500 hover:bg-purple-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loadingB ? (
-                <div className="text-slate-400">Loading...</div>
-              ) : (
-                <div className="text-slate-400">
-                  <Upload className="w-8 h-8 mx-auto mb-2" />
-                  Click to load Session B
-                </div>
+            <div className="space-y-3">
+              <button
+                onClick={() => handleLoadSession('b')}
+                disabled={loadingB}
+                className="w-full py-6 border-2 border-dashed border-slate-600 rounded-lg hover:border-purple-500 hover:bg-purple-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loadingB ? (
+                  <div className="text-slate-400">Loading...</div>
+                ) : (
+                  <div className="text-slate-400">
+                    <Upload className="w-6 h-6 mx-auto mb-2" />
+                    Upload File
+                  </div>
+                )}
+              </button>
+
+              {/* Select from discovered sessions */}
+              {discoveryList && discoveryList.length > 0 && (
+                <button
+                  onClick={() => openSessionSelector('b')}
+                  disabled={loadingB}
+                  className="w-full py-6 border-2 border-dashed border-slate-600 rounded-lg hover:border-blue-500 hover:bg-blue-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <div className="text-slate-400">
+                    <Terminal className="w-6 h-6 mx-auto mb-2" />
+                    Select from Discovered Sessions
+                  </div>
+                </button>
               )}
-            </button>
+            </div>
           )}
         </div>
       </div>
@@ -552,6 +627,95 @@ export function SessionCompare({ defaultSession }: SessionCompareProps) {
         <div className="bg-slate-800 rounded-xl border border-slate-700 p-12 text-center">
           <BarChart3 className="w-12 h-12 text-slate-600 mx-auto mb-4" />
           <p className="text-slate-400">Load two sessions to start comparing</p>
+        </div>
+      )}
+
+      {/* Session Selector Modal */}
+      {showSessionSelector && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-800 rounded-2xl border border-slate-700 w-full max-w-3xl max-h-[80vh] overflow-hidden shadow-2xl">
+            <div className="flex items-center justify-between p-6 border-b border-slate-700">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-lg bg-blue-500/20 text-blue-400">
+                  <Search className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">Select Session</h3>
+                  <p className="text-sm text-slate-400">
+                    {discoveryList?.length || 0} sessions available
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowSessionSelector(false);
+                  setSelectedSlot(null);
+                }}
+                className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-auto max-h-[60vh]">
+              {!discoveryList || discoveryList.length === 0 ? (
+                <div className="text-center py-12">
+                  <Search className="w-12 h-12 text-slate-600 mx-auto mb-4" />
+                  <p className="text-slate-400">No discovered sessions available</p>
+                  <p className="text-sm text-slate-500 mt-2">
+                    Make sure Claude is running and has active sessions
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {discoveryList.map((session) => (
+                    <button
+                      key={session.fullPath}
+                      onClick={() => handleSelectDiscoverySession(session)}
+                      className="text-left p-4 rounded-xl border border-slate-700 hover:border-blue-500 hover:bg-slate-700/50 transition-all group"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          {session.sessionName && (
+                            <div className="text-emerald-400 font-medium text-sm mb-1">
+                              {session.sessionName}
+                            </div>
+                          )}
+                          <div className="text-slate-200 font-medium truncate">
+                            {session.folderName}
+                          </div>
+                          <div className="text-slate-500 text-xs font-mono mt-1 truncate">
+                            {session.id}
+                          </div>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <div className="text-xs text-slate-400">{session.size}</div>
+                          <div className="text-xs text-slate-500 mt-1">
+                            {new Date(session.lastUpdated).toLocaleDateString()}
+                          </div>
+                          <div className="text-xs text-slate-600">
+                            {new Date(session.lastUpdated).toLocaleTimeString()}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-slate-700 bg-slate-800/50">
+              <button
+                onClick={() => {
+                  setShowSessionSelector(false);
+                  setSelectedSlot(null);
+                }}
+                className="w-full py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl transition-colors text-sm font-medium"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
