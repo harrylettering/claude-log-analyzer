@@ -494,12 +494,20 @@ class LogFileWatcher {
         this.watcher = null;
         this.currentPos = 0;
         this.activeFile = null;
+        // Holds a trailing partial line across reads. A watch event can fire
+        // while a line is only half-written, and the remainder must survive
+        // until the rest of it lands.
+        this.lineBuffer = '';
+        // Reads are async, so serialize them: two overlapping reads would
+        // interleave their chunks into lineBuffer and corrupt every line.
+        this.readChain = Promise.resolve();
     }
 
     watchPath(filePath) {
         if (this.watcher) this.watcher.close();
         this.activeFile = filePath;
-        this.currentPos = 0; 
+        this.currentPos = 0;
+        this.lineBuffer = '';
 
         console.log(`[Watcher] Starting live watch: ${filePath}`);
         
@@ -516,32 +524,67 @@ class LogFileWatcher {
     }
 
     readNewLines() {
-        if (!this.activeFile || !fs.existsSync(this.activeFile)) return;
-        const stats = fs.statSync(this.activeFile);
-        
-        if (stats.size > this.currentPos) {
+        // Queue behind any in-flight read so chunks stay in file order.
+        this.readChain = this.readChain.then(() => this.readNewLinesOnce());
+        return this.readChain;
+    }
+
+    readNewLinesOnce() {
+        return new Promise((resolve) => {
+            if (!this.activeFile || !fs.existsSync(this.activeFile)) return resolve();
+
+            let stats;
+            try {
+                stats = fs.statSync(this.activeFile);
+            } catch {
+                return resolve();
+            }
+
+            if (stats.size < this.currentPos) {
+                // The file was truncated or replaced; start over.
+                this.currentPos = stats.size;
+                this.lineBuffer = '';
+                return resolve();
+            }
+
+            if (stats.size === this.currentPos) return resolve();
+
+            const readTo = stats.size;
             const stream = fs.createReadStream(this.activeFile, {
                 start: this.currentPos,
-                end: stats.size
+                end: readTo,
             });
 
-            let buffer = '';
+            // Decode as UTF-8 across chunk boundaries. Without this, a
+            // multi-byte character split between two chunks is decoded
+            // independently on each side and becomes replacement characters.
+            stream.setEncoding('utf8');
+
             stream.on('data', (chunk) => {
-                buffer += chunk.toString();
-                if (buffer.includes('\n')) {
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop();
-                    lines.forEach(line => {
-                        if (line.trim()) {
-                            this.sendToFrontend('log-entry', line);
-                        }
-                    });
-                }
+                this.lineBuffer += chunk;
+                const lines = this.lineBuffer.split('\n');
+                // The tail is only a complete line if the data ended on a
+                // newline; otherwise it waits here for the rest.
+                this.lineBuffer = lines.pop();
+                lines.forEach((line) => {
+                    if (line.trim()) {
+                        this.sendToFrontend('log-entry', line);
+                    }
+                });
             });
-            this.currentPos = stats.size;
-        } else if (stats.size < this.currentPos) {
-            this.currentPos = stats.size;
-        }
+
+            // Advance only once the bytes are actually buffered, so a failed
+            // read does not silently skip them.
+            stream.on('end', () => {
+                this.currentPos = readTo;
+                resolve();
+            });
+
+            stream.on('error', (err) => {
+                console.error('[Watcher] Read failed:', err);
+                resolve();
+            });
+        });
     }
 
     sendToFrontend(type, payload) {
