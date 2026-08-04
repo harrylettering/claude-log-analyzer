@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   Search,
   Filter,
@@ -39,19 +39,62 @@ const SEARCH_MODES: { value: SearchMode; label: string }[] = [
   { value: 'regex', label: 'Regular Expression' },
 ];
 
+// Searching scans every entry, so hold off until typing pauses.
+const QUERY_DEBOUNCE_MS = 250;
+
 export function AdvancedSearchFilter({
   entries, filters, onFiltersChange, resultCount, totalCount }: AdvancedSearchFilterProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const availableToolNames = useMemo(() => getToolNames(entries), [entries]);
 
+  // Keep the input responsive by echoing keystrokes locally and only pushing
+  // the query into the filter state once typing settles.
+  const [queryDraft, setQueryDraft] = useState(filters.query);
+  const queryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastPushedQueryRef = useRef(filters.query);
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+
+  const cancelPendingQuery = useCallback(() => {
+    if (queryTimerRef.current !== null) {
+      clearTimeout(queryTimerRef.current);
+      queryTimerRef.current = null;
+    }
+  }, []);
+
+  // Adopt query changes that came from outside this input (e.g. a reset),
+  // without clobbering what the user is currently typing.
+  useEffect(() => {
+    if (filters.query !== lastPushedQueryRef.current) {
+      lastPushedQueryRef.current = filters.query;
+      cancelPendingQuery();
+      setQueryDraft(filters.query);
+    }
+  }, [filters.query, cancelPendingQuery]);
+
+  useEffect(() => cancelPendingQuery, [cancelPendingQuery]);
+
   const updateFilter = useCallback((updates: Partial<SearchFilters>) => {
     onFiltersChange({ ...filters, ...updates });
   }, [filters, onFiltersChange]);
 
+  const handleQueryChange = useCallback((value: string) => {
+    setQueryDraft(value);
+    cancelPendingQuery();
+    queryTimerRef.current = setTimeout(() => {
+      queryTimerRef.current = null;
+      lastPushedQueryRef.current = value;
+      onFiltersChange({ ...filtersRef.current, query: value });
+    }, QUERY_DEBOUNCE_MS);
+  }, [cancelPendingQuery, onFiltersChange]);
+
   const resetFilters = useCallback(() => {
+    cancelPendingQuery();
+    lastPushedQueryRef.current = DEFAULT_FILTERS.query;
+    setQueryDraft(DEFAULT_FILTERS.query);
     onFiltersChange({ ...DEFAULT_FILTERS });
-  }, [onFiltersChange]);
+  }, [cancelPendingQuery, onFiltersChange]);
 
   const toggleMessageType = useCallback((type: MessageTypeFilter) => {
     let newTypes: MessageTypeFilter[];
@@ -76,8 +119,9 @@ export function AdvancedSearchFilter({
     updateFilter({ toolNames: newTools });
   }, [filters.toolNames, updateFilter]);
 
+  // Validate what is on screen so the warning tracks typing, not the debounce.
   const isRegexValid = filters.searchMode === 'regex'
-    ? (!filters.query || isValidRegex(filters.query))
+    ? (!queryDraft || isValidRegex(queryDraft))
     : true;
 
   const hasActiveFilters = useMemo(() => {
@@ -114,8 +158,8 @@ export function AdvancedSearchFilter({
               <input
                 type="text"
                 placeholder="Search log content..."
-                value={filters.query}
-                onChange={(e) => updateFilter({ query: e.target.value })}
+                value={queryDraft}
+                onChange={(e) => handleQueryChange(e.target.value)}
                 className={`w-full bg-slate-900 border rounded-lg pl-10 pr-4 py-2 text-sm focus:outline-none focus:ring-2 ${
                   isRegexValid
                     ? 'border-slate-600 focus:ring-blue-500'

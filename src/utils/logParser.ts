@@ -327,169 +327,257 @@ function stringifyResultContent(content: unknown): string {
 
 // ============ Main Parse Function ============
 
-export function parseLog(content: string): ParseResult {
-  const lines = content.split('\n').filter((line) => line.trim());
-  const entries: LogEntry[] = [];
-  const toolCalls: ToolCall[] = [];
-  const tokenUsage: ParsedLogData['tokenUsage'] = [];
-  const turnDurations: ParsedLogData['turnDurations'] = [];
-  const errors: ParseError[] = [];
-  const pendingToolCalls = new Map<string, ToolCall>();
-  const validTimestamps: number[] = [];
+// A session accumulates parse state so that streamed log lines can be folded in
+// one at a time. Re-parsing the whole file on every appended entry is O(n^2)
+// and dominates everything else in a long live session.
+export interface LogSession {
+  entries: LogEntry[];
+  resolvedToolCalls: ToolCall[];
+  pendingToolCalls: Map<string, ToolCall>;
+  tokenUsage: ParsedLogData['tokenUsage'];
+  turnDurations: ParsedLogData['turnDurations'];
+  errors: ParseError[];
+  lineNumber: number;
+  // Running aggregates, so stats never require a full re-scan.
+  userMessages: number;
+  assistantMessages: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  minTimestamp: number;
+  maxTimestamp: number;
+  models: Set<string>;
+}
 
-  lines.forEach((line, lineIndex) => {
-    try {
-      const entry = JSON.parse(line) as LogEntry;
-      entry._category = categorizeEntry(entry);
-      entries.push(entry);
+export function createLogSession(): LogSession {
+  return {
+    entries: [],
+    resolvedToolCalls: [],
+    pendingToolCalls: new Map(),
+    tokenUsage: [],
+    turnDurations: [],
+    errors: [],
+    lineNumber: 0,
+    userMessages: 0,
+    assistantMessages: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    minTimestamp: Infinity,
+    maxTimestamp: -Infinity,
+    models: new Set(),
+  };
+}
 
-      const ts = getTimestamp(entry);
-      if (!isNaN(ts)) validTimestamps.push(ts);
+function ingestLine(session: LogSession, line: string): void {
+  const {
+    entries,
+    resolvedToolCalls: toolCalls,
+    pendingToolCalls,
+    tokenUsage,
+    turnDurations,
+    errors,
+  } = session;
+  const lineIndex = session.lineNumber++;
 
-      // Assistant message handling.
-      if (entry.type === 'assistant' && entry.message) {
-        const contentArray = Array.isArray(entry.message.content) ? entry.message.content : [];
-        let hasToolUse = false;
-        let assistantText = '';
+  try {
+    const entry = JSON.parse(line) as LogEntry;
+    entry._category = categorizeEntry(entry);
+    entries.push(entry);
 
-        contentArray.forEach((item) => {
-          if (item.type === 'thinking') {
-            setParsedActionWithPriority(entry, { type: 'AgentThought', text: (item as any).thinking });
-          } else if (item.type === 'text') {
-            assistantText += (item as any).text + '\n';
-          }
-          const toolUse = extractToolUseFromContent(item);
-          if (toolUse) {
-            hasToolUse = true;
-            const toolCall: ToolCall = { id: toolUse.id, name: toolUse.name, input: toolUse.input, timestamp: entry.timestamp };
-            pendingToolCalls.set(toolCall.id, toolCall);
-            const action = createInitialAgentAction(item as ToolUseBlock);
-            if (action) {
-              setParsedActionWithPriority(entry, action);
-              (toolCall as any).sourceEntry = entry;
-            }
-          }
-        });
+    if (isRealUserInput(entry)) session.userMessages++;
+    if (entry.type === 'assistant') session.assistantMessages++;
+    if (entry.message?.model) session.models.add(entry.message.model);
 
-        // Pure text assistant replies become AssistantText actions.
-        if (!hasToolUse && assistantText.trim()) {
-          setParsedActionWithPriority(entry, { type: 'AssistantText', content: assistantText.trim() });
+    const ts = getTimestamp(entry);
+    if (!isNaN(ts)) {
+      if (ts < session.minTimestamp) session.minTimestamp = ts;
+      if (ts > session.maxTimestamp) session.maxTimestamp = ts;
+    }
+
+    // Assistant message handling.
+    if (entry.type === 'assistant' && entry.message) {
+      const contentArray = Array.isArray(entry.message.content) ? entry.message.content : [];
+      let hasToolUse = false;
+      let assistantText = '';
+
+      contentArray.forEach((item) => {
+        if (item.type === 'thinking') {
+          setParsedActionWithPriority(entry, { type: 'AgentThought', text: (item as any).thinking });
+        } else if (item.type === 'text') {
+          assistantText += (item as any).text + '\n';
         }
-      }
-
-      // Sub-agent task handling.
-      if (entry.toolUseResult?.content) {
-        entry.toolUseResult.content.forEach((item) => {
-          const action = createInitialAgentAction(item as any);
-          if (action) setParsedActionWithPriority(entry, action);
-        });
-      }
-
-      // User message handling.
-      if (entry.type === 'user' && entry.message) {
-        const contentArray = Array.isArray(entry.message.content) ? entry.message.content : [];
-        let userText = '';
-        let hasImage = false;
-        let hasToolResult = false;
-
-        contentArray.forEach((item) => {
-          // User-uploaded image.
-          if (item.type === 'image' && (item as any).source?.data) {
-            hasImage = true;
-            const imageId = `user_img_${entry.uuid}`;
-            saveImage(imageId, (item as any).source.data).catch(console.error);
-            setParsedActionWithPriority(entry, { type: 'UserImage', imageId, description: 'User upload' });
-          } else if (item.type === 'text') {
-            userText += (item as any).text + '\n';
+        const toolUse = extractToolUseFromContent(item);
+        if (toolUse) {
+          hasToolUse = true;
+          const toolCall: ToolCall = { id: toolUse.id, name: toolUse.name, input: toolUse.input, timestamp: entry.timestamp };
+          pendingToolCalls.set(toolCall.id, toolCall);
+          const action = createInitialAgentAction(item as ToolUseBlock);
+          if (action) {
+            setParsedActionWithPriority(entry, action);
+            (toolCall as any).sourceEntry = entry;
           }
-          // Match tool results back to their pending tool calls.
-          const result = processToolResult(item);
-          if (result?.toolUseId) {
-            hasToolResult = true;
+        }
+      });
+
+      // Pure text assistant replies become AssistantText actions.
+      if (!hasToolUse && assistantText.trim()) {
+        setParsedActionWithPriority(entry, { type: 'AssistantText', content: assistantText.trim() });
+      }
+    }
+
+    // Sub-agent task handling.
+    if (entry.toolUseResult?.content) {
+      entry.toolUseResult.content.forEach((item) => {
+        const action = createInitialAgentAction(item as any);
+        if (action) setParsedActionWithPriority(entry, action);
+      });
+    }
+
+    // User message handling.
+    if (entry.type === 'user' && entry.message) {
+      const contentArray = Array.isArray(entry.message.content) ? entry.message.content : [];
+      let userText = '';
+      let hasImage = false;
+      let hasToolResult = false;
+
+      contentArray.forEach((item) => {
+        // User-uploaded image.
+        if (item.type === 'image' && (item as any).source?.data) {
+          hasImage = true;
+          const imageId = `user_img_${entry.uuid}`;
+          saveImage(imageId, (item as any).source.data).catch(console.error);
+          setParsedActionWithPriority(entry, { type: 'UserImage', imageId, description: 'User upload' });
+        } else if (item.type === 'text') {
+          userText += (item as any).text + '\n';
+        }
+        // Match tool results back to their pending tool calls.
+        const result = processToolResult(item);
+        if (result?.toolUseId) {
+          hasToolResult = true;
+          setParsedActionWithPriority(entry, {
+            type: 'TaskResult',
+            toolUseId: result.toolUseId,
+            content: stringifyResultContent(result.content),
+            isError: result.isError
+          });
+          const toolCall = pendingToolCalls.get(result.toolUseId);
+          if (toolCall) {
+            toolCall.result = result.content;
+            toolCall.isError = result.isError;
+            toolCalls.push(toolCall);
+            pendingToolCalls.delete(result.toolUseId);
+            const sourceEntry = (toolCall as any).sourceEntry as LogEntry | undefined;
+            if (sourceEntry?.parsedAction) {
+              updateAgentActionWithResult(sourceEntry.parsedAction, result.content, result.isError, entry.uuid);
+            }
+          } else {
+            // If no matching tool call is found, emit a standalone TaskResult action.
             setParsedActionWithPriority(entry, {
               type: 'TaskResult',
               toolUseId: result.toolUseId,
               content: stringifyResultContent(result.content),
               isError: result.isError
             });
-            const toolCall = pendingToolCalls.get(result.toolUseId);
-            if (toolCall) {
-              toolCall.result = result.content;
-              toolCall.isError = result.isError;
-              toolCalls.push(toolCall);
-              pendingToolCalls.delete(result.toolUseId);
-              const sourceEntry = (toolCall as any).sourceEntry as LogEntry | undefined;
-              if (sourceEntry?.parsedAction) {
-                updateAgentActionWithResult(sourceEntry.parsedAction, result.content, result.isError, entry.uuid);
-              }
-            } else {
-              // If no matching tool call is found, emit a standalone TaskResult action.
-              setParsedActionWithPriority(entry, {
-                type: 'TaskResult',
-                toolUseId: result.toolUseId,
-                content: stringifyResultContent(result.content),
-                isError: result.isError
-              });
-            }
           }
+        }
+      });
+
+      // Handle toolUseResult objects attached directly to the entry.
+      if (!hasToolResult && entry.toolUseResult) {
+        hasToolResult = true;
+        // Convert the direct toolUseResult into a TaskResult action.
+        const resultContent = entry.toolUseResult.content
+          ? (typeof entry.toolUseResult.content === 'string'
+            ? entry.toolUseResult.content
+            : JSON.stringify(entry.toolUseResult.content, null, 2))
+          : JSON.stringify(entry.toolUseResult, null, 2);
+
+        setParsedActionWithPriority(entry, {
+          type: 'TaskResult',
+          toolUseId: entry.toolUseResult.status === 'error' ? `error-${entry.uuid}` : entry.uuid,
+          content: resultContent,
+          isError: entry.toolUseResult.status === 'error'
         });
-
-        // Handle toolUseResult objects attached directly to the entry.
-        if (!hasToolResult && entry.toolUseResult) {
-          hasToolResult = true;
-          // Convert the direct toolUseResult into a TaskResult action.
-          const resultContent = entry.toolUseResult.content
-            ? (typeof entry.toolUseResult.content === 'string'
-              ? entry.toolUseResult.content
-              : JSON.stringify(entry.toolUseResult.content, null, 2))
-            : JSON.stringify(entry.toolUseResult, null, 2);
-
-          setParsedActionWithPriority(entry, {
-            type: 'TaskResult',
-            toolUseId: entry.toolUseResult.status === 'error' ? `error-${entry.uuid}` : entry.uuid,
-            content: resultContent,
-            isError: entry.toolUseResult.status === 'error'
-          });
-        }
-
-        // Pure user text without images or tool results becomes a UserMessage action.
-        if (!hasImage && !hasToolResult && userText.trim()) {
-          setParsedActionWithPriority(entry, { type: 'UserMessage', content: userText.trim() });
-        }
       }
 
-      // Token accounting and stats.
-      const usage = extractTokenUsage(entry);
-      if (usage) {
-        tokenUsage.push({ timestamp: entry.timestamp, ...usage });
-        if (entry.parsedAction) {
-          entry.parsedAction.usage = { input: usage.inputTokens, output: usage.outputTokens, total: usage.totalTokens };
-        }
+      // Pure user text without images or tool results becomes a UserMessage action.
+      if (!hasImage && !hasToolResult && userText.trim()) {
+        setParsedActionWithPriority(entry, { type: 'UserMessage', content: userText.trim() });
       }
-
-      if (entry.type === 'system' && (entry.subtype === 'turn_duration' || entry.durationMs)) {
-        turnDurations.push({ timestamp: entry.timestamp, durationMs: entry.durationMs || 0, messageCount: entry.messageCount || 0 });
-      }
-    } catch (e) {
-      errors.push({ line: lineIndex + 1, raw: line, error: e as Error });
     }
-  });
 
-  toolCalls.push(...pendingToolCalls.values());
-  const stats = calculateStats(entries, tokenUsage, toolCalls, turnDurations, validTimestamps);
+    // Token accounting and stats.
+    const usage = extractTokenUsage(entry);
+    if (usage) {
+      tokenUsage.push({ timestamp: entry.timestamp, ...usage });
+      session.inputTokens += usage.inputTokens;
+      session.outputTokens += usage.outputTokens;
+      session.totalTokens += usage.totalTokens;
+      if (entry.parsedAction) {
+        entry.parsedAction.usage = { input: usage.inputTokens, output: usage.outputTokens, total: usage.totalTokens };
+      }
+    }
 
-  return { data: { entries, stats, toolCalls, tokenUsage, turnDurations }, errors };
+    if (entry.type === 'system' && (entry.subtype === 'turn_duration' || entry.durationMs)) {
+      turnDurations.push({ timestamp: entry.timestamp, durationMs: entry.durationMs || 0, messageCount: entry.messageCount || 0 });
+    }
+  } catch (e) {
+    errors.push({ line: lineIndex + 1, raw: line, error: e as Error });
+  }
 }
 
-function calculateStats(entries: LogEntry[], tokenUsage: any[], toolCalls: ToolCall[], _durations: any[], validTimestamps: number[]): SessionStats {
-  const userMessages = entries.filter(isRealUserInput).length;
-  const assistantMessages = entries.filter(e => e.type === 'assistant').length;
-  let inT = 0, outT = 0, totT = 0;
-  tokenUsage.forEach(t => { inT += t.inputTokens; outT += t.outputTokens; totT += t.totalTokens; });
-  const duration = validTimestamps.length >= 2 ? Math.max(...validTimestamps) - Math.min(...validTimestamps) : 0;
-  const models = Array.from(new Set(entries.map(e => e.message?.model).filter(Boolean) as string[]));
+// Fold raw JSONL text into the session and return the updated snapshot.
+export function appendLogContent(session: LogSession, content: string): ParseResult {
+  const lines = content.split('\n');
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    ingestLine(session, line);
+  }
+  return buildParseResult(session);
+}
 
-  return { totalMessages: entries.length, userMessages, assistantMessages, toolCalls: toolCalls.length, totalTokens: totT, inputTokens: inT, outputTokens: outT, sessionDuration: duration, modelsUsed: models };
+// Snapshots copy the accumulated arrays: consumers rely on reference changes to
+// detect updates, and the session keeps mutating its own copies.
+function buildParseResult(session: LogSession): ParseResult {
+  const toolCalls = session.pendingToolCalls.size > 0
+    ? [...session.resolvedToolCalls, ...session.pendingToolCalls.values()]
+    : session.resolvedToolCalls.slice();
+
+  const entries = session.entries.slice();
+  const tokenUsage = session.tokenUsage.slice();
+  const turnDurations = session.turnDurations.slice();
+
+  return {
+    data: {
+      entries,
+      stats: buildStats(session, toolCalls.length),
+      toolCalls,
+      tokenUsage,
+      turnDurations,
+    },
+    errors: session.errors.slice(),
+  };
+}
+
+function buildStats(session: LogSession, toolCallCount: number): SessionStats {
+  const hasRange = session.maxTimestamp > session.minTimestamp;
+
+  return {
+    totalMessages: session.entries.length,
+    userMessages: session.userMessages,
+    assistantMessages: session.assistantMessages,
+    toolCalls: toolCallCount,
+    totalTokens: session.totalTokens,
+    inputTokens: session.inputTokens,
+    outputTokens: session.outputTokens,
+    sessionDuration: hasRange ? session.maxTimestamp - session.minTimestamp : 0,
+    modelsUsed: Array.from(session.models),
+  };
+}
+
+export function parseLog(content: string): ParseResult {
+  return appendLogContent(createLogSession(), content);
 }
 
 export function formatDuration(ms: number): string {
