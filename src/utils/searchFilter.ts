@@ -1,38 +1,57 @@
 import type { LogEntry } from '../types/log';
 import type { SearchFilters, SearchResult, SearchMode, MessageTypeFilter } from '../types/search';
 
-// Check whether a string matches the query.
-function matchesQuery(
-  text: string,
-  query: string,
-  searchMode: SearchMode,
-  caseSensitive: boolean
-): boolean {
-  if (!query) return true;
-
-  const searchText = caseSensitive ? text : text.toLowerCase();
-  const searchQuery = caseSensitive ? query : query.toLowerCase();
-
-  switch (searchMode) {
-    case 'exact':
-      return searchText === searchQuery;
-    case 'regex':
-      try {
-        const regex = new RegExp(query, caseSensitive ? '' : 'i');
-        return regex.test(text);
-      } catch {
-        // Fall back to a plain substring match when the regex is invalid.
-        return searchText.includes(searchQuery);
-      }
-    case 'simple':
-    default:
-      return searchText.includes(searchQuery);
-  }
-}
+// Serializing an entry is expensive on large sessions, so cache the result per
+// entry object. Parsed entries are not mutated afterwards, and a WeakMap lets
+// the cache be collected together with the log data itself.
+const searchTextCache = new WeakMap<object, string>();
+const lowerSearchTextCache = new WeakMap<object, string>();
 
 // Get the searchable text for an entry by serializing the raw payload.
 function getEntrySearchText(entry: LogEntry): string {
-  return JSON.stringify(entry);
+  const cached = searchTextCache.get(entry as object);
+  if (cached !== undefined) return cached;
+
+  const text = JSON.stringify(entry);
+  searchTextCache.set(entry as object, text);
+  return text;
+}
+
+function getEntrySearchTextLower(entry: LogEntry): string {
+  const cached = lowerSearchTextCache.get(entry as object);
+  if (cached !== undefined) return cached;
+
+  const text = getEntrySearchText(entry).toLowerCase();
+  lowerSearchTextCache.set(entry as object, text);
+  return text;
+}
+
+// Build the query matcher once per filter run rather than per entry, so regex
+// compilation and case folding do not repeat for every log entry.
+function createQueryMatcher(
+  query: string,
+  searchMode: SearchMode,
+  caseSensitive: boolean
+): ((entry: LogEntry) => boolean) | null {
+  if (!query) return null;
+
+  if (searchMode === 'regex') {
+    try {
+      const regex = new RegExp(query, caseSensitive ? '' : 'i');
+      return (entry) => regex.test(getEntrySearchText(entry));
+    } catch {
+      // Fall through to a plain substring match when the regex is invalid.
+    }
+  }
+
+  const needle = caseSensitive ? query : query.toLowerCase();
+  const readText = caseSensitive ? getEntrySearchText : getEntrySearchTextLower;
+
+  if (searchMode === 'exact') {
+    return (entry) => readText(entry) === needle;
+  }
+
+  return (entry) => readText(entry).includes(needle);
 }
 
 // Check whether the entry type matches the filter.
@@ -171,6 +190,14 @@ export function filterEntries(
   const filtered: LogEntry[] = [];
   let matchCount = 0;
 
+  // Built once; null when there is no query, which lets us skip serializing
+  // every entry entirely on the common "no search term" path.
+  const queryMatcher = createQueryMatcher(
+    filters.query,
+    filters.searchMode,
+    filters.caseSensitive
+  );
+
   for (const entry of entries) {
     // Message-type filter.
     if (!matchesMessageType(entry, filters.messageTypes)) continue;
@@ -194,17 +221,11 @@ export function filterEntries(
     if (filters.onlySidechain && !entry.isSidechain) continue;
 
     // Query matching.
-    const searchText = getEntrySearchText(entry);
-    const matches = matchesQuery(
-      searchText,
-      filters.query,
-      filters.searchMode,
-      filters.caseSensitive
-    );
+    if (queryMatcher) {
+      if (!queryMatcher(entry)) continue;
+      matchCount++;
+    }
 
-    if (!matches) continue;
-
-    if (filters.query) matchCount++;
     filtered.push(entry);
   }
 

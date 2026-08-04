@@ -17,7 +17,21 @@ import { ActionCardRenderer } from './AgentActionCards';
 
 const OVERSCAN_COUNT = 3;
 const BASE_ITEM_HEIGHT = 150; // Base item height
+const SUMMARY_ITEM_HEIGHT = 120; // Summary rows are more compact
+// Short lists render in full: virtualization buys nothing below this size and
+// keeps the simpler layout path for typical small sessions.
+const VIRTUALIZE_THRESHOLD = 60;
+// Raw entries can be megabytes; pretty-printing all of it freezes the tab.
+const RAW_JSON_CHAR_LIMIT = 20000;
 type TimelineDensity = 'summary' | 'detail';
+
+function formatRawEntry(entry: unknown): string {
+  const json = JSON.stringify(entry, null, 2);
+  if (json.length <= RAW_JSON_CHAR_LIMIT) return json;
+  return `${json.slice(0, RAW_JSON_CHAR_LIMIT)}\n\n... truncated ${(
+    json.length - RAW_JSON_CHAR_LIMIT
+  ).toLocaleString()} more characters`;
+}
 
 interface TimelineViewProps {
   data: ParsedLogData;
@@ -326,10 +340,10 @@ const TimelineEntry = memo(function TimelineEntry({
   item: DisplayTimelineItem;
   index: number;
   isExpanded: boolean;
-  onToggle: () => void;
+  onToggle: (key: string) => void;
   totalItems: number;
   density: TimelineDensity;
-  onMeasure?: (height: number) => void;
+  onMeasure?: (index: number, height: number) => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
   const entry = item.entries[0];
@@ -342,24 +356,28 @@ const TimelineEntry = memo(function TimelineEntry({
   const roleLabel = entry.message?.role || entry.type || 'event';
   const stageMeta = getStageMeta(item.stageStart || 'other');
 
-  // Measure the rendered height and report it to the parent.
+  // Measure before paint so the virtualized layout settles without a flash.
+  // Sub-pixel heights matter: rounding here accumulates into visible drift
+  // between the computed offsets and where rows actually land.
   useLayoutEffect(() => {
     if (cardRef.current && onMeasure) {
-      onMeasure(cardRef.current.offsetHeight);
+      onMeasure(index, cardRef.current.getBoundingClientRect().height);
     }
-  }, [isExpanded, onMeasure, item]);
+  }, [isExpanded, onMeasure, index, item]);
 
+  // Catch later height changes (images, wrapping, lazy content). Both deps are
+  // stable, so the observer is not torn down on every render.
   useEffect(() => {
     if (!cardRef.current || !onMeasure) return;
 
     const element = cardRef.current;
     const observer = new ResizeObserver(() => {
-      onMeasure(element.offsetHeight);
+      onMeasure(index, element.getBoundingClientRect().height);
     });
 
     observer.observe(element);
     return () => observer.disconnect();
-  }, [onMeasure, item]);
+  }, [onMeasure, index]);
 
   return (
     <div ref={cardRef} className="relative pb-3">
@@ -410,7 +428,7 @@ const TimelineEntry = memo(function TimelineEntry({
                   </span>
                 )}
                 <button
-                  onClick={onToggle}
+                  onClick={() => onToggle(item.key)}
                   className="p-1 hover:bg-slate-800 rounded-lg transition-colors text-slate-500"
                 >
                   {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
@@ -503,14 +521,14 @@ const TimelineEntry = memo(function TimelineEntry({
                           </div>
                         )}
                         <pre className="text-[10px] text-blue-400/70 overflow-x-auto max-h-72 bg-black/40 p-4 rounded-xl w-full font-mono leading-relaxed">
-                          {JSON.stringify(groupEntry, null, 2)}
+                          {formatRawEntry(groupEntry)}
                         </pre>
                       </div>
                     ))}
                   </div>
                 ) : (
                   <pre className="text-[10px] text-blue-400/70 overflow-x-auto max-h-96 bg-black/40 p-4 rounded-xl w-full font-mono leading-relaxed">
-                    {JSON.stringify(entry, null, 2)}
+                    {formatRawEntry(entry)}
                   </pre>
                 )}
               </div>
@@ -522,129 +540,148 @@ const TimelineEntry = memo(function TimelineEntry({
   );
 });
 
-// Virtual list with dynamic row heights.
-function DynamicVirtualList({
-  items,
-  expandedEntries,
-  onToggleExpand,
-  containerHeight,
-  density,
-}: {
+// Binary search for the last row whose top offset is at or above the scroll
+// position, so scrolling stays O(log n) instead of scanning every row.
+function findFirstVisibleIndex(positions: number[], scrollTop: number): number {
+  let low = 0;
+  let high = positions.length - 1;
+  let result = 0;
+
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (positions[mid] <= scrollTop) {
+      result = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return result;
+}
+
+interface TimelineListProps {
   items: DisplayTimelineItem[];
   expandedEntries: Set<string>;
   onToggleExpand: (key: string) => void;
   containerHeight: number;
   density: TimelineDensity;
-}) {
-  const scrollRef = useRef<HTMLDivElement>(null);
+}
+
+// Virtual list with dynamic row heights. Only rows near the viewport are
+// mounted, so cost tracks the visible window rather than the session length.
+function VirtualTimelineList({
+  items,
+  expandedEntries,
+  onToggleExpand,
+  containerHeight,
+  density,
+}: TimelineListProps) {
   const [scrollTop, setScrollTop] = useState(0);
-  // Store row heights in a ref to avoid unnecessary rerenders.
-  const heightsRef = useRef<number[]>([]);
-  const [version, setVersion] = useState(0); // Used to trigger layout refreshes.
+  // Measured heights keyed by row key, so they survive re-filtering and the
+  // incremental appends of a live session. Kept per density, since the same row
+  // has a different height in each mode.
+  const heightMapsRef = useRef<Record<TimelineDensity, Map<string, number>>>({
+    summary: new Map(),
+    detail: new Map(),
+  });
+  const [layoutVersion, setLayoutVersion] = useState(0);
+  const layoutDirtyRef = useRef(false);
   const measureRafRef = useRef<number | null>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const pendingScrollTopRef = useRef(0);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const densityRef = useRef(density);
+  densityRef.current = density;
+
+  const estimatedHeight = density === 'summary' ? SUMMARY_ITEM_HEIGHT : BASE_ITEM_HEIGHT;
 
   const scheduleLayoutRefresh = useCallback(() => {
+    layoutDirtyRef.current = true;
     if (measureRafRef.current !== null) return;
+
     measureRafRef.current = requestAnimationFrame(() => {
       measureRafRef.current = null;
-      setVersion(v => v + 1);
+      layoutDirtyRef.current = false;
+      setLayoutVersion(v => v + 1);
     });
   }, []);
 
-  // Initialize the height cache.
+  // Effects can be torn down between a measurement and the frame that applies
+  // it (StrictMode's double mount, or a remount), which cancels the pending
+  // refresh. Rows already measured will not report again, so re-arm here.
   useEffect(() => {
-    const estimatedHeight = density === 'summary' ? 120 : BASE_ITEM_HEIGHT;
-    heightsRef.current = new Array(items.length).fill(estimatedHeight);
-    setVersion(v => v + 1);
-  }, [items.length, density]);
+    if (layoutDirtyRef.current) scheduleLayoutRefresh();
 
-  // Re-measure rows after expand/collapse state changes.
-  useEffect(() => {
-    // Wait for the DOM to settle, then re-measure.
-    const timeout = setTimeout(() => {
-      setVersion(v => v + 1);
-    }, 100);
-    return () => clearTimeout(timeout);
-  }, [expandedEntries]);
-
-  useEffect(() => {
     return () => {
       if (measureRafRef.current !== null) {
         cancelAnimationFrame(measureRafRef.current);
+        measureRafRef.current = null;
+      }
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
       }
     };
-  }, []);
-
-  // Measure a single row height.
-  const handleMeasure = useCallback((index: number, height: number) => {
-    if (heightsRef.current[index] !== height) {
-      heightsRef.current[index] = height;
-      scheduleLayoutRefresh();
-    }
   }, [scheduleLayoutRefresh]);
 
+  // Report a measured row height. Stable identity keeps TimelineEntry memoized.
+  const handleMeasure = useCallback((index: number, height: number) => {
+    const item = itemsRef.current[index];
+    if (!item || height <= 0) return;
+
+    const heights = heightMapsRef.current[densityRef.current];
+    if (heights.get(item.key) === height) return;
+
+    heights.set(item.key, height);
+    scheduleLayoutRefresh();
+  }, [scheduleLayoutRefresh]);
+
+  // Coalesce scroll events into one state update per frame.
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    setScrollTop(e.currentTarget.scrollTop);
+    pendingScrollTopRef.current = e.currentTarget.scrollTop;
+    if (scrollRafRef.current !== null) return;
+
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      setScrollTop(pendingScrollTopRef.current);
+    });
   }, []);
 
-  // Compute cumulative heights (the top offset for each row).
-  const itemPositions = useMemo(() => {
-    const positions: number[] = [];
+  // Cumulative top offsets, recomputed only when the list or a height changes.
+  const { positions, totalHeight } = useMemo(() => {
+    const heights = heightMapsRef.current[density];
+    const next = new Array<number>(items.length);
     let cumulative = 0;
+
     for (let i = 0; i < items.length; i++) {
-      positions.push(cumulative);
-      cumulative += heightsRef.current[i] || BASE_ITEM_HEIGHT;
-    }
-    return positions;
-  }, [items.length, version]);
-
-  const totalHeight = itemPositions.length > 0
-    ? itemPositions[itemPositions.length - 1] + (heightsRef.current[itemPositions.length - 1] || BASE_ITEM_HEIGHT)
-    : 0;
-
-  // Compute the visible range.
-  const findVisibleRange = useCallback(() => {
-    const heights = heightsRef.current;
-    let startIndex = 0;
-    let endIndex = items.length - 1;
-
-    // Find the first row that intersects the viewport.
-    for (let i = 0; i < items.length; i++) {
-      const itemTop = itemPositions[i];
-      const itemBottom = itemTop + (heights[i] || BASE_ITEM_HEIGHT);
-      if (itemBottom >= scrollTop) {
-        startIndex = Math.max(0, i - OVERSCAN_COUNT);
-        break;
-      }
+      next[i] = cumulative;
+      cumulative += heights.get(items[i].key) ?? estimatedHeight;
     }
 
-    // Find the last row that still intersects the viewport.
-    for (let i = items.length - 1; i >= 0; i--) {
-      const itemTop = itemPositions[i];
-      if (itemTop <= scrollTop + containerHeight) {
-        endIndex = Math.min(items.length - 1, i + OVERSCAN_COUNT);
-        break;
-      }
-    }
+    return { positions: next, totalHeight: cumulative };
+  }, [items, density, estimatedHeight, layoutVersion]);
 
-    return { startIndex, endIndex };
-  }, [items.length, itemPositions, scrollTop, containerHeight]);
+  const startIndex = Math.max(0, findFirstVisibleIndex(positions, scrollTop) - OVERSCAN_COUNT);
 
-  const { startIndex, endIndex } = findVisibleRange();
+  let endIndex = startIndex;
+  const viewportBottom = scrollTop + containerHeight;
+  while (endIndex < items.length - 1 && positions[endIndex + 1] <= viewportBottom) {
+    endIndex++;
+  }
+  endIndex = Math.min(items.length - 1, endIndex + OVERSCAN_COUNT);
 
-  // Render the visible rows.
   const visibleRows: JSX.Element[] = [];
   for (let i = startIndex; i <= endIndex; i++) {
     const item = items[i];
-    const isExpanded = expandedEntries.has(item.key);
-    const top = itemPositions[i];
 
     visibleRows.push(
       <div
         key={item.key}
         style={{
           position: 'absolute',
-          top: `${top}px`,
+          top: `${positions[i]}px`,
           left: 0,
           right: 0,
         }}
@@ -652,11 +689,11 @@ function DynamicVirtualList({
         <TimelineEntry
           item={item}
           index={i}
-          isExpanded={isExpanded}
-          onToggle={() => onToggleExpand(item.key)}
+          isExpanded={expandedEntries.has(item.key)}
+          onToggle={onToggleExpand}
           totalItems={items.length}
           density={density}
-          onMeasure={(height) => handleMeasure(i, height)}
+          onMeasure={handleMeasure}
         />
       </div>
     );
@@ -664,7 +701,6 @@ function DynamicVirtualList({
 
   return (
     <div
-      ref={scrollRef}
       onScroll={handleScroll}
       style={{
         height: containerHeight,
@@ -680,19 +716,14 @@ function DynamicVirtualList({
   );
 }
 
-function FlowTimelineList({
+// Plain list for short sessions, where mounting every row is cheap.
+function PlainTimelineList({
   items,
   expandedEntries,
   onToggleExpand,
   containerHeight,
   density,
-}: {
-  items: DisplayTimelineItem[];
-  expandedEntries: Set<string>;
-  onToggleExpand: (key: string) => void;
-  containerHeight: number;
-  density: TimelineDensity;
-}) {
+}: TimelineListProps) {
   return (
     <div
       style={{ height: containerHeight, overflow: 'auto' }}
@@ -704,7 +735,7 @@ function FlowTimelineList({
           item={item}
           index={index}
           isExpanded={expandedEntries.has(item.key)}
-          onToggle={() => onToggleExpand(item.key)}
+          onToggle={onToggleExpand}
           totalItems={items.length}
           density={density}
         />
@@ -755,14 +786,18 @@ export function TimelineView({ data, cliResult, isCliAnalyzing, cliError, onRunC
   }, [data?.entries, filters]);
   const filteredEntries = searchResult.entries;
 
-  // Precompute stable entry keys.
+  // Precompute stable entry keys. Resumed and forked sessions can repeat a
+  // uuid, so keys are de-duplicated: collisions would otherwise share React
+  // keys and cached row heights.
   const entriesWithKeys = useMemo(() => {
     try {
-      return filteredEntries.map((entry, index) => ({
-        entry,
-        index,
-        key: entry.uuid || `fallback-${index}`,
-      }));
+      const seenKeys = new Set<string>();
+      return filteredEntries.map((entry, index) => {
+        let key = entry.uuid || `fallback-${index}`;
+        if (seenKeys.has(key)) key = `${key}-${index}`;
+        seenKeys.add(key);
+        return { entry, index, key };
+      });
     } catch (e) {
       console.error('Failed to process entries:', e);
       return [];
@@ -801,7 +836,7 @@ export function TimelineView({ data, cliResult, isCliAnalyzing, cliError, onRunC
               <h2 className="text-2xl font-bold mb-2">Session Timeline</h2>
               <p className="text-slate-400 text-sm">
                 Track each action and reasoning step from the AI coding session
-                {entriesWithKeys.length > 1000 && (
+                {displayItems.length > VIRTUALIZE_THRESHOLD && (
                   <span className="ml-2 text-amber-500/70 text-xs">
                     (virtualized list over {entriesWithKeys.length.toLocaleString()} entries)
                   </span>
@@ -851,23 +886,20 @@ export function TimelineView({ data, cliResult, isCliAnalyzing, cliError, onRunC
             </div>
           </div>
         ) : (
-          density === 'summary' ? (
-            <FlowTimelineList
-              items={displayItems}
-              expandedEntries={expandedEntries}
-              onToggleExpand={toggleExpand}
-              containerHeight={Math.max(listHeight, 200)}
-              density={density}
-            />
-          ) : (
-            <DynamicVirtualList
-              items={displayItems}
-              expandedEntries={expandedEntries}
-              onToggleExpand={toggleExpand}
-              containerHeight={Math.max(listHeight, 200)}
-              density={density}
-            />
-          )
+          (() => {
+            const ListComponent = displayItems.length > VIRTUALIZE_THRESHOLD
+              ? VirtualTimelineList
+              : PlainTimelineList;
+            return (
+              <ListComponent
+                items={displayItems}
+                expandedEntries={expandedEntries}
+                onToggleExpand={toggleExpand}
+                containerHeight={Math.max(listHeight, 200)}
+                density={density}
+              />
+            );
+          })()
         )}
 
         {loopWarning && (

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { BarChart2, MessageSquare, Clock, Zap, AlertCircle, Loader2, GitMerge, Sparkles, Activity, Terminal, Search, HardDrive, PlayCircle, Upload, Share2, Calendar } from 'lucide-react'
-import { parseLog } from './utils/logParser'
-import type { ParsedLogData, LogEntry } from './types/log'
+import { appendLogContent, createLogSession } from './utils/logParser'
+import type { ParsedLogData } from './types/log'
 import { FileUpload } from './components/FileUpload'
 import { SessionOverview } from './components/SessionOverview'
 import { TokenDashboard } from './components/TokenDashboard'
@@ -40,6 +40,9 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null)
   const activePathRef = useRef<string | null>(null)
   const offlineLogContentRef = useRef<string | null>(null)
+  // Parse state for the log currently on screen, so streamed lines can be
+  // folded in without re-parsing the whole session.
+  const logSessionRef = useRef(createLogSession())
 
   // Time window options
   const timeWindowOptions = [
@@ -78,12 +81,9 @@ export default function App() {
         if (type === 'discovery-list') {
           setDiscoveryList(payload)
         } else if (type === 'log-entry') {
-          const result = parseLog(payload)
-          if (result.data.entries.length > 0) {
-            updateLogDataIncrementally(result.data.entries[0])
-          }
+          appendLiveLogContent(payload)
         } else if (type === 'session-reset') {
-          setLogData(null)
+          resetLogSession()
           setCurrentView('overview')
           resetClaudeCliAnalysis()
         } else if (type === 'claude-analysis-start') {
@@ -108,7 +108,7 @@ export default function App() {
 
   const startWatching = (path: string) => {
     if (wsRef.current && isWsConnected) {
-      setLogData(null)
+      resetLogSession()
       resetClaudeCliAnalysis()
       offlineLogContentRef.current = null
       activePathRef.current = path
@@ -149,20 +149,16 @@ export default function App() {
     }
   }, [isWsConnected])
 
-  // Incremental update logic.
-  const updateLogDataIncrementally = useCallback((newEntry: LogEntry) => {
-    setLogData(prev => {
-      if (!prev) {
-        return {
-          entries: [newEntry],
-          stats: { totalMessages: 1, userMessages: 0, assistantMessages: 0, toolCalls: 0, totalTokens: 0, inputTokens: 0, outputTokens: 0, sessionDuration: 0, modelsUsed: [] },
-          toolCalls: [], tokenUsage: [], turnDurations: []
-        }
-      }
-      const updatedEntries = [...prev.entries, newEntry];
-      const fullContent = updatedEntries.map(e => JSON.stringify(e)).join('\n');
-      return parseLog(fullContent).data;
-    })
+  // Incremental update logic: fold the new lines into the running parse state.
+  const appendLiveLogContent = useCallback((content: string) => {
+    const result = appendLogContent(logSessionRef.current, content)
+    if (result.data.entries.length === 0) return
+    setLogData(result.data)
+  }, [])
+
+  const resetLogSession = useCallback(() => {
+    logSessionRef.current = createLogSession()
+    setLogData(null)
   }, [])
 
   const handleFileLoad = useCallback((content: string) => {
@@ -174,7 +170,8 @@ export default function App() {
 
     setTimeout(() => {
       try {
-        const result = parseLog(content)
+        logSessionRef.current = createLogSession()
+        const result = appendLogContent(logSessionRef.current, content)
         setLogData(result.data)
         setCurrentView('overview')
       } catch (e) {
@@ -443,7 +440,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           {logData && (
             <button
-              onClick={() => { setLogData(null); wsRef.current?.send(JSON.stringify({ type: 'get-discovery-list' })); }}
+              onClick={() => { resetLogSession(); wsRef.current?.send(JSON.stringify({ type: 'get-discovery-list' })); }}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 text-slate-900 hover:bg-white transition-all shadow-xl"
             >
               <Search className="w-4 h-4" />
