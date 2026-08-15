@@ -1418,7 +1418,17 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
     const highlightedNodes = new Set<string>()
     const visibleNodeOpacity = new Map<string, number>()
     const activeToolSummaries = new Map<string, string>()
+    const nodeSceneShift = new Map<string, { x: number; y: number; weight: number }>()
     const mainPulse = getMainAgentPulse(currentTimeRef.current, sceneInfoRef.current)
+
+    const placeNodeInScene = (node: CanvasNodeData) => {
+      const claimed = nodeSceneShift.get(node.entityId)
+      if (claimed) return shiftNodeForScene(node, claimed.x, claimed.y)
+      const fallbackScene = nodeSceneRef.current.get(node.entityId)
+      if (fallbackScene === undefined) return node
+      const state = getSceneRenderState(currentTimeRef.current, fallbackScene, sceneInfoRef.current)
+      return shiftNodeForScene(node, state.shiftX, state.shiftY)
+    }
 
     const mainAgentNode = canvasNodesRef.current.get('1')
     if (mainAgentNode) {
@@ -1439,6 +1449,14 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       ctx.fill()
     }
 
+    const visibleEdges: {
+      edge: CanvasEdgeData
+      rawSource: CanvasNodeData
+      rawTarget: CanvasNodeData
+      timing: ReturnType<typeof getEdgeTiming>
+      renderAlpha: number
+    }[] = []
+
     canvasEdgesRef.current.forEach((edge) => {
       const edgeSceneId = edgeSceneRef.current.get(edge.id) ?? 0
       const sceneState = getSceneRenderState(currentTimeRef.current, edgeSceneId, sceneInfoRef.current)
@@ -1447,11 +1465,7 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       const rawSource = canvasNodesRef.current.get(edge.source)
       const rawTarget = canvasNodesRef.current.get(edge.target)
       if (!rawSource || !rawTarget) return
-      const source = shiftNodeForScene(rawSource, sceneState.shiftX, sceneState.shiftY)
-      const target = shiftNodeForScene(rawTarget, sceneState.shiftX, sceneState.shiftY)
-      const color = EDGE_COLORS[edge.linkType] ?? COLORS.accent
       const timing = getEdgeTiming(currentTimeRef.current, edgeTimingRef.current.get(edge.id))
-      const edgeOffset = getEdgeOffset(edge, canvasEdgesRef.current)
       const reverseExists = canvasEdgesRef.current.has(`${edge.target}-${edge.source}`)
       const inactiveAlpha = reverseExists ? 0.08 : 0.2
       const renderAlpha = sceneState.opacity * (timing.active ? Math.max(0.46, timing.pulseAlpha) : inactiveAlpha)
@@ -1459,19 +1473,35 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       visibleNodeOpacity.set(edge.source, Math.max(visibleNodeOpacity.get(edge.source) ?? 0, Math.min(1, renderAlpha + 0.18)))
       visibleNodeOpacity.set(edge.target, Math.max(visibleNodeOpacity.get(edge.target) ?? 0, Math.min(1, renderAlpha + 0.12)))
 
+      const shiftWeight = sceneState.opacity * (timing.active ? 4 : 1)
+      const claimShift = (entityId: string) => {
+        const current = nodeSceneShift.get(entityId)
+        if (current && current.weight >= shiftWeight) return
+        nodeSceneShift.set(entityId, { x: sceneState.shiftX, y: sceneState.shiftY, weight: shiftWeight })
+      }
+      claimShift(edge.source)
+      claimShift(edge.target)
+
       if (timing.active) {
         highlightedNodes.add(edge.source)
         highlightedNodes.add(edge.target)
         if (edge.actionSummary) {
-          const sourceNode = canvasNodesRef.current.get(edge.source)
-          const targetNode = canvasNodesRef.current.get(edge.target)
-          if (edge.linkType === 'tool_call' && targetNode?.entityType === 'tool') {
+          if (edge.linkType === 'tool_call' && rawTarget.entityType === 'tool') {
             activeToolSummaries.set(edge.target, edge.actionSummary)
-          } else if (edge.linkType === 'tool_result' && sourceNode?.entityType === 'tool') {
+          } else if (edge.linkType === 'tool_result' && rawSource.entityType === 'tool') {
             activeToolSummaries.set(edge.source, edge.actionSummary)
           }
         }
       }
+
+      visibleEdges.push({ edge, rawSource, rawTarget, timing, renderAlpha })
+    })
+
+    visibleEdges.forEach(({ edge, rawSource, rawTarget, timing, renderAlpha }) => {
+      const source = placeNodeInScene(rawSource)
+      const target = placeNodeInScene(rawTarget)
+      const color = EDGE_COLORS[edge.linkType] ?? COLORS.accent
+      const edgeOffset = getEdgeOffset(edge, canvasEdgesRef.current)
 
       if (edge.source === edge.target) {
         drawSelfLoop(ctx, source, color, renderAlpha, timing.active)
@@ -1480,8 +1510,6 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       }
 
       if (renderAlpha > 0.22 && timing.active) {
-        const sourceBox = getNodeBox(source)
-        const targetBox = getNodeBox(target)
         const midX = (source.x + target.x) / 2
         const midY = (source.y + target.y) / 2
         ctx.fillStyle = withAlpha('#0b1627', 0.68 * renderAlpha)
@@ -1494,7 +1522,7 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
         ctx.font = '700 10px ui-monospace, SFMono-Regular, monospace'
         ctx.textAlign = 'center'
         ctx.textBaseline = 'middle'
-        ctx.fillText(String(edge.seqNum), (sourceBox.x + sourceBox.width + targetBox.x) / 2, midY)
+        ctx.fillText(String(edge.seqNum), midX, midY)
       }
     })
 
@@ -1507,9 +1535,14 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       const rawSource = canvasNodesRef.current.get(edge.source)
       const rawTarget = canvasNodesRef.current.get(edge.target)
       if (!rawSource || !rawTarget || edge.source === edge.target) return
-      const source = shiftNodeForScene(rawSource, sceneState.shiftX, sceneState.shiftY)
-      const target = shiftNodeForScene(rawTarget, sceneState.shiftX, sceneState.shiftY)
-      drawParticle(ctx, source, target, particle.progress, particle.color, getEdgeOffset(edge, canvasEdgesRef.current))
+      drawParticle(
+        ctx,
+        placeNodeInScene(rawSource),
+        placeNodeInScene(rawTarget),
+        particle.progress,
+        particle.color,
+        getEdgeOffset(edge, canvasEdgesRef.current)
+      )
     })
 
     if (currentTimeRef.current >= (nodeTimingRef.current.get('1') ?? Number.POSITIVE_INFINITY)) {
@@ -1517,20 +1550,13 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
     }
 
     canvasNodesRef.current.forEach((node) => {
-      const sceneShift =
-        nodeSceneRef.current.has(node.entityId)
-          ? {
-              x: getSceneRenderState(currentTimeRef.current, nodeSceneRef.current.get(node.entityId)!, sceneInfoRef.current).shiftX,
-              y: getSceneRenderState(currentTimeRef.current, nodeSceneRef.current.get(node.entityId)!, sceneInfoRef.current).shiftY,
-            }
-          : { x: 0, y: 0 }
       const opacity = visibleNodeOpacity.get(node.entityId) ?? 0
       if (opacity <= 0.02) return
       ctx.save()
       ctx.globalAlpha = Math.min(1, opacity)
       drawNode(
         ctx,
-        shiftNodeForScene(node, sceneShift.x, sceneShift.y),
+        placeNodeInScene(node),
         getNodeProgress(currentTimeRef.current, nodeTimingRef.current.get(node.entityId)),
         highlightedNodes.has(node.entityId) ? 1 : 0,
         node.entityId === '1' ? mainPulse : 0,
