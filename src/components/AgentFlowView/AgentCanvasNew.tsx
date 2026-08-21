@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CanvasBuilder } from './simulation/canvasBuilder'
-import type { FlowCycleKind } from './simulation/canvasBuilder'
+import { PARTICLE_DURATION, POST_FADE_DURATION, SCENE_HOLD_DURATION } from './simulation/flowTimeline'
+import type { EdgeCyclePosition, FlowTimeline, OrderedEdge, SceneInfo } from './simulation/flowTimeline'
 import { compactPaths } from './lib/pathText'
-import type { ParsedLogData } from '../../types/log'
 
 type CanvasNodeData = {
   entityId: string
@@ -43,19 +42,6 @@ type ActiveParticle = {
   color: string
 }
 
-type EdgeCyclePosition = {
-  cycleNumber: number
-  cycleTitle: string
-  cycleKind: FlowCycleKind
-  hopIndex: number
-  hopCount: number
-}
-
-type OrderedEdge = {
-  edge: CanvasEdgeData
-  time: number
-}
-
 type StepState = 'running' | 'done' | 'idle'
 
 type EdgeStatus = {
@@ -71,12 +57,6 @@ type EdgeStatus = {
   hopIndex?: number
   hopCount?: number
   nextUp?: string
-}
-
-type SceneInfo = {
-  sceneId: number
-  startTime: number
-  endTime: number
 }
 
 type SceneRenderState = {
@@ -180,14 +160,7 @@ const LANE_LABELS = [
 ]
 
 const SPEED_OPTIONS = [0.25, 0.5, 1, 2]
-// 一跳的粒子动画时长，必须短于 HOP_INTERVAL，否则同一回合内相邻两跳会同时激活
-const PARTICLE_DURATION = 0.42
-const POST_FADE_DURATION = 0.38
 const CAMERA_LERP = 0.12
-// 回合内每跳的间隔，以及回合之间的停顿
-const HOP_INTERVAL = 0.5
-const CYCLE_GAP = 0.55
-const SCENE_HOLD_DURATION = 0.3
 const SCENE_SHIFT_DISTANCE = 260
 const SCENE_SHIFT_Y_DISTANCE = 92
 
@@ -1254,10 +1227,15 @@ function getMainAgentPulse(currentTime: number, scenes: Map<number, SceneInfo>) 
 }
 
 interface AgentCanvasNewProps {
-  data?: ParsedLogData | null
+  timeline: FlowTimeline
+  /** 从轨迹视图切回来时的续播位置。 */
+  initialTime?: number
+  /** 播放位置变化时上报（暂停/跳转/结束时，不是每帧）。 */
+  onTimeCommit?: (time: number) => void
+  toolbarExtra?: React.ReactNode
 }
 
-export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
+export function AgentCanvasNew({ timeline, initialTime = 0, onTimeCommit, toolbarExtra }: AgentCanvasNewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -1294,6 +1272,13 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
   const progressTrackRef = useRef<HTMLDivElement>(null)
   const isSeekingRef = useRef(false)
   const wasPlayingBeforeSeekRef = useRef(false)
+
+  const initialTimeRef = useRef(initialTime)
+  const onTimeCommitRef = useRef(onTimeCommit)
+  onTimeCommitRef.current = onTimeCommit
+
+  // 卸载（例如切到轨迹视图）时把播放位置交回上层，两个视图才能接得上。
+  useEffect(() => () => onTimeCommitRef.current?.(currentTimeRef.current), [])
 
   const syncParticlesAtTime = useCallback((time: number) => {
     const particles: ActiveParticle[] = []
@@ -1364,11 +1349,12 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
   }, [])
 
   useEffect(() => {
-    if (!data?.entries?.length || dimensions.width <= 0 || dimensions.height <= 0) {
+    if (timeline.cycleTimings.length === 0 || dimensions.width <= 0 || dimensions.height <= 0) {
       canvasNodesRef.current = new Map()
       canvasEdgesRef.current = new Map()
       edgeTimingRef.current = new Map()
       nodeTimingRef.current = new Map()
+      orderedEdgesRef.current = []
       totalDurationRef.current = 0
       setIsPlaying(false)
       currentTimeRef.current = 0
@@ -1376,80 +1362,31 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       return
     }
 
-    const builder = new CanvasBuilder()
-    builder.buildCanvasGraph(data.entries)
-    builder.initializePositions(dimensions.width, dimensions.height)
+    // 坐标依赖画布尺寸，只能在这里算；时间轴则由上层共享，保证与轨迹视图一致。
+    timeline.builder.initializePositions(dimensions.width, dimensions.height)
 
-    const nodes = builder.getCanvasNodes()
-    const cycles = builder.getCycles()
+    canvasNodesRef.current = timeline.nodes
+    canvasEdgesRef.current = timeline.edges
+    edgeTimingRef.current = timeline.edgeTiming
+    nodeTimingRef.current = timeline.nodeTiming
+    edgeSceneRef.current = timeline.edgeScene
+    nodeSceneRef.current = timeline.nodeScene
+    sceneInfoRef.current = timeline.sceneInfo
+    edgePairsRef.current = timeline.edgePairs
+    edgeCycleRef.current = timeline.edgeCycle
+    orderedEdgesRef.current = timeline.orderedEdges
+    cycleCountRef.current = timeline.cycleTimings.length
+    systemEventCountRef.current = timeline.systemEvents.length
+    totalDurationRef.current = timeline.totalDuration
 
-    const edges = new Map<string, CanvasEdgeData>()
-    const edgeTiming = new Map<string, number>()
-    const nodeTiming = new Map<string, number>()
-    const edgeScene = new Map<string, number>()
-    const nodeScene = new Map<string, number>()
-    const sceneInfo = new Map<number, SceneInfo>()
-    const edgePairs = new Set<string>()
-    const edgeCycle = new Map<string, EdgeCyclePosition>()
-    const orderedEdges: OrderedEdge[] = []
-
-    let time = 0
-
-    cycles.forEach((cycle, cycleIndex) => {
-      const sceneId = cycleIndex
-      const sceneStart = time
-
-      cycle.hops.forEach((hop, hopIndex) => {
-        const edge: CanvasEdgeData = { ...hop, seqNum: cycleIndex + 1 }
-        edges.set(hop.id, edge)
-        edgeTiming.set(hop.id, time)
-        edgeScene.set(hop.id, sceneId)
-        edgePairs.add(`${hop.source}->${hop.target}`)
-        edgeCycle.set(hop.id, {
-          cycleNumber: cycleIndex + 1,
-          cycleTitle: cycle.title,
-          cycleKind: cycle.kind,
-          hopIndex,
-          hopCount: cycle.hops.length,
-        })
-        orderedEdges.push({ edge, time })
-
-        if (!nodeScene.has(hop.source)) nodeScene.set(hop.source, sceneId)
-        if (!nodeScene.has(hop.target)) nodeScene.set(hop.target, sceneId)
-        nodeTiming.set(hop.source, Math.min(nodeTiming.get(hop.source) ?? Number.POSITIVE_INFINITY, time))
-        nodeTiming.set(hop.target, Math.min(nodeTiming.get(hop.target) ?? Number.POSITIVE_INFINITY, time + 0.06))
-
-        time += HOP_INTERVAL
-      })
-
-      sceneInfo.set(sceneId, {
-        sceneId,
-        startTime: sceneStart,
-        endTime: time - HOP_INTERVAL + PARTICLE_DURATION + SCENE_HOLD_DURATION,
-      })
-      time += CYCLE_GAP
-    })
-
-    canvasNodesRef.current = nodes
-    canvasEdgesRef.current = edges
-    edgeTimingRef.current = edgeTiming
-    nodeTimingRef.current = nodeTiming
-    edgeSceneRef.current = edgeScene
-    nodeSceneRef.current = nodeScene
-    sceneInfoRef.current = sceneInfo
-    edgePairsRef.current = edgePairs
-    edgeCycleRef.current = edgeCycle
-    orderedEdgesRef.current = orderedEdges
-    cycleCountRef.current = cycles.length
-    systemEventCountRef.current = builder.getSystemEvents().length
-    totalDurationRef.current = Math.max(time + 0.6, 1.8)
-    currentTimeRef.current = 0
-    setCurrentTime(0)
-    isPlayingRef.current = true
-    setIsPlaying(true)
-    activeParticlesRef.current = []
-    fitToView(nodes, dimensions.width, dimensions.height)
-  }, [data, dimensions, fitToView])
+    const startTime = clamp(initialTimeRef.current, 0, timeline.totalDuration)
+    currentTimeRef.current = startTime
+    setCurrentTime(startTime)
+    syncParticlesAtTime(startTime)
+    isPlayingRef.current = startTime < timeline.totalDuration
+    setIsPlaying(startTime < timeline.totalDuration)
+    fitToView(timeline.nodes, dimensions.width, dimensions.height)
+  }, [timeline, dimensions, fitToView, syncParticlesAtTime])
 
   useEffect(() => {
     isPlayingRef.current = isPlaying
@@ -1692,6 +1629,7 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       if (currentTimeRef.current >= duration) {
         isPlayingRef.current = false
         setIsPlaying(false)
+        onTimeCommitRef.current?.(currentTimeRef.current)
       }
     }
 
@@ -1711,7 +1649,10 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       currentTimeRef.current = 0
       setCurrentTime(0)
     }
-    setIsPlaying((prev) => !prev)
+    setIsPlaying((prev) => {
+      if (prev) onTimeCommitRef.current?.(currentTimeRef.current)
+      return !prev
+    })
   }, [])
 
   const seekToTime = useCallback((time: number) => {
@@ -1721,6 +1662,7 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
     lastTimestampRef.current = 0
     setCurrentTime(nextTime)
     syncParticlesAtTime(nextTime)
+    onTimeCommitRef.current?.(nextTime)
 
     const edge =
       getActiveEdgeAtTime(nextTime, orderedEdgesRef.current) ??
@@ -1855,6 +1797,8 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
         >
           Reset View
         </button>
+
+        {toolbarExtra}
 
         <div className="ml-3 flex items-center gap-2">
           {SPEED_OPTIONS.map((option) => (
