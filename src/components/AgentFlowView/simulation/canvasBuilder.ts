@@ -7,6 +7,7 @@
  */
 
 import type { LogEntry } from '../../../types/log'
+import { compactPaths } from '../lib/pathText'
 
 // ─── Entity ID Constants ────────────────────────────────────────────────────────
 
@@ -94,7 +95,8 @@ function parseRole(entry: LogEntry): Role {
 function truncateText(value: unknown, maxLength = 84): string {
   if (value === undefined || value === null) return ''
   const raw = typeof value === 'string' ? value : JSON.stringify(value)
-  const singleLine = raw.replace(/\s+/g, ' ').trim()
+  // 先把长路径压成 …/父目录/文件名，再截断，避免截掉最有信息量的文件名
+  const singleLine = compactPaths(raw.replace(/\s+/g, ' ').trim())
   if (!singleLine) return ''
   return singleLine.length > maxLength ? `${singleLine.slice(0, maxLength - 1)}…` : singleLine
 }
