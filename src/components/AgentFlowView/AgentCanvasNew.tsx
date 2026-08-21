@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CanvasBuilder } from './simulation/canvasBuilder'
+import { compactPaths } from './lib/pathText'
 import type { ParsedLogData } from '../../types/log'
 
 type CanvasNodeData = {
@@ -41,11 +42,19 @@ type ActiveParticle = {
   color: string
 }
 
+type StepState = 'running' | 'done' | 'idle'
+
 type EdgeStatus = {
   edgeId: string | null
+  state: StepState
+  stateLabel: string
   title: string
-  summary?: string
-  detail: string
+  phase?: string
+  route?: string
+  detail?: string
+  stepNumber?: number
+  totalSteps: number
+  nextUp?: string
 }
 
 type SceneInfo = {
@@ -127,6 +136,12 @@ const TOOL_THEME: Record<ToolVisualCategory, { accent: string; badge: string }> 
   user: { accent: '#2dd4bf', badge: 'ASK' },
   system: { accent: '#f472b6', badge: 'SYS' },
   generic: { accent: '#f59e0b', badge: 'TOOL' },
+}
+
+const STEP_STATE_COLORS: Record<StepState, string> = {
+  running: '#38bdf8',
+  done: '#64748b',
+  idle: '#475569',
 }
 
 const EDGE_COLORS: Record<string, string> = {
@@ -212,7 +227,7 @@ function getDisplayLabel(node: CanvasNodeData) {
 
 function truncateStepText(value: string | undefined, max = 96) {
   if (!value) return undefined
-  const compact = value.replace(/\s+/g, ' ').trim()
+  const compact = compactPaths(value.replace(/\s+/g, ' ').trim())
   if (!compact) return undefined
   return compact.length > max ? `${compact.slice(0, max - 1).trimEnd()}…` : compact
 }
@@ -1058,49 +1073,39 @@ function getEdgeStatusAtTime(
     .filter((item): item is { edge: CanvasEdgeData; time: number } => item.time !== undefined)
     .sort((a, b) => a.time - b.time)
 
+  const totalSteps = orderedEdges.length
   const active = orderedEdges.find(({ time }) => currentTime >= time && currentTime <= time + PARTICLE_DURATION)
-  if (active) {
-    const { edge } = active
-    const phase = getEdgePhaseLabel(edge.linkType)
-    return {
-      edgeId: edge.id,
-      title: truncateStepText(edge.actionSummary, 88) ?? phase,
-      summary: `${phase} · ${getEdgeRoute(edge, nodes)}`,
-      detail: edge.actionDetail ?? `${phase} is currently in progress.`,
-    }
-  }
-
-  const next = orderedEdges.find(({ time }) => time > currentTime)
   const previous = [...orderedEdges].reverse().find(({ time }) => time <= currentTime)
+  const next = orderedEdges.find(({ time }) => time > currentTime)
+  const nextUp = next
+    ? `${getEdgePhaseLabel(next.edge.linkType)} · ${getEdgeRoute(next.edge, nodes)}`
+    : undefined
 
-  if (next) {
-    const nextPhase = getEdgePhaseLabel(next.edge.linkType)
-    const previousLabel = previous
-      ? truncateStepText(previous.edge.actionSummary, 42) ?? getEdgePhaseLabel(previous.edge.linkType)
-      : 'initial scene'
+  const focus = active ?? previous
+  if (!focus) {
     return {
-      edgeId: next.edge.id,
-      title: truncateStepText(next.edge.actionSummary, 88) ?? `Up next: ${nextPhase}`,
-      summary: `Up next · ${nextPhase} · ${getEdgeRoute(next.edge, nodes)}`,
-      detail: `Transitioning from ${previousLabel} to the next scene while the upcoming call fades in.`,
+      edgeId: null,
+      state: 'idle',
+      stateLabel: 'Standby',
+      title: 'Waiting for the first call',
+      totalSteps,
+      nextUp,
     }
   }
 
-  if (previous) {
-    const previousPhase = getEdgePhaseLabel(previous.edge.linkType)
-    return {
-      edgeId: previous.edge.id,
-      title: truncateStepText(previous.edge.actionSummary, 88) ?? `${previousPhase} complete`,
-      summary: `Completed · ${previousPhase} · ${getEdgeRoute(previous.edge, nodes)}`,
-      detail: previous.edge.actionDetail ?? 'Playback has reached the end of the current flow.',
-    }
-  }
-
+  const { edge } = focus
+  const phase = getEdgePhaseLabel(edge.linkType)
   return {
-    edgeId: null,
-    title: 'Step Transition',
-    summary: 'Preparing the first scene',
-    detail: 'The agent flow is getting ready to reveal the first call in the sequence.',
+    edgeId: edge.id,
+    state: active ? 'running' : 'done',
+    stateLabel: active ? 'Running' : next ? 'Completed' : 'Flow complete',
+    title: truncateStepText(edge.actionSummary, 88) ?? phase,
+    phase,
+    route: getEdgeRoute(edge, nodes),
+    detail: edge.actionDetail ? truncateStepText(edge.actionDetail, 140) : undefined,
+    stepNumber: edge.seqNum || undefined,
+    totalSteps,
+    nextUp,
   }
 }
 
@@ -1140,6 +1145,23 @@ function getActiveEdgeAtTime(
     }
   }
   return null
+}
+
+function getLastEdgeBeforeTime(
+  currentTime: number,
+  edges: Map<string, CanvasEdgeData>,
+  edgeTiming: Map<string, number>
+) {
+  let bestEdge: CanvasEdgeData | null = null
+  let bestTime = Number.NEGATIVE_INFINITY
+  for (const edge of edges.values()) {
+    const time = edgeTiming.get(edge.id)
+    if (time !== undefined && time <= currentTime && time > bestTime) {
+      bestTime = time
+      bestEdge = edge
+    }
+  }
+  return bestEdge
 }
 
 function getEdgeOffset(edge: CanvasEdgeData, edges: Map<string, CanvasEdgeData>) {
@@ -1240,6 +1262,27 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
 
   const isDraggingRef = useRef(false)
   const lastMousePosRef = useRef({ x: 0, y: 0 })
+
+  const progressTrackRef = useRef<HTMLDivElement>(null)
+  const isSeekingRef = useRef(false)
+  const wasPlayingBeforeSeekRef = useRef(false)
+
+  const syncParticlesAtTime = useCallback((time: number) => {
+    const particles: ActiveParticle[] = []
+    edgeTimingRef.current.forEach((edgeTime, edgeId) => {
+      const elapsed = time - edgeTime
+      if (elapsed >= 0 && elapsed <= PARTICLE_DURATION) {
+        const edge = canvasEdgesRef.current.get(edgeId)
+        if (!edge) return
+        particles.push({
+          edgeId,
+          progress: Math.min(1, elapsed / PARTICLE_DURATION),
+          color: EDGE_COLORS[edge.linkType] ?? COLORS.accent,
+        })
+      }
+    })
+    activeParticlesRef.current = particles
+  }, [])
 
   const activeEdge = getActiveEdgeAtTime(currentTime, canvasEdgesRef.current, edgeTimingRef.current)
   const activeEdgeStatus = getEdgeStatusAtTime(currentTime, canvasEdgesRef.current, edgeTimingRef.current, canvasNodesRef.current)
@@ -1610,20 +1653,7 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
         }
       }
 
-      const particles: ActiveParticle[] = []
-      edgeTimingRef.current.forEach((time, edgeId) => {
-        const elapsed = currentTimeRef.current - time
-        if (elapsed >= 0 && elapsed <= PARTICLE_DURATION) {
-          const edge = canvasEdgesRef.current.get(edgeId)
-          if (!edge) return
-          particles.push({
-            edgeId,
-            progress: Math.min(1, elapsed / PARTICLE_DURATION),
-            color: EDGE_COLORS[edge.linkType] ?? COLORS.accent,
-          })
-        }
-      })
-      activeParticlesRef.current = particles
+      syncParticlesAtTime(currentTimeRef.current)
 
       if (currentTimeRef.current >= duration) {
         isPlayingRef.current = false
@@ -1648,6 +1678,70 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       setCurrentTime(0)
     }
     setIsPlaying((prev) => !prev)
+  }, [])
+
+  const seekToTime = useCallback((time: number) => {
+    const duration = totalDurationRef.current || 0
+    const nextTime = clamp(time, 0, duration)
+    currentTimeRef.current = nextTime
+    lastTimestampRef.current = 0
+    setCurrentTime(nextTime)
+    syncParticlesAtTime(nextTime)
+
+    const edge =
+      getActiveEdgeAtTime(nextTime, canvasEdgesRef.current, edgeTimingRef.current) ??
+      getLastEdgeBeforeTime(nextTime, canvasEdgesRef.current, edgeTimingRef.current)
+    if (!edge) return
+    const source = canvasNodesRef.current.get(edge.source)
+    const target = canvasNodesRef.current.get(edge.target)
+    if (!source || !target) return
+    const path = getEdgePath(source, target, getEdgeOffset(edge, canvasEdgesRef.current))
+    setCamera((prev) => constrainCamera({
+      scale: prev.scale,
+      offsetX: dimensions.width / 2 - path.start.x * prev.scale,
+      offsetY: dimensions.height / 2 - path.start.y * prev.scale,
+    }, canvasNodesRef.current, dimensions))
+  }, [dimensions, syncParticlesAtTime])
+
+  const seekToClientX = useCallback((clientX: number) => {
+    const track = progressTrackRef.current
+    if (!track) return
+    const rect = track.getBoundingClientRect()
+    if (rect.width <= 0) return
+    const ratio = clamp((clientX - rect.left) / rect.width, 0, 1)
+    seekToTime(ratio * (totalDurationRef.current || 0))
+  }, [seekToTime])
+
+  const handleSeekPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      // pointer capture is best effort; seeking still works without it
+    }
+    isSeekingRef.current = true
+    wasPlayingBeforeSeekRef.current = isPlayingRef.current
+    setIsPlaying(false)
+    seekToClientX(e.clientX)
+  }, [seekToClientX])
+
+  const handleSeekPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isSeekingRef.current) return
+    seekToClientX(e.clientX)
+  }, [seekToClientX])
+
+  const handleSeekPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isSeekingRef.current) return
+    isSeekingRef.current = false
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }
+    } catch {
+      // ignore: capture may already be released by the browser
+    }
+    if (wasPlayingBeforeSeekRef.current && currentTimeRef.current < totalDurationRef.current) {
+      setIsPlaying(true)
+    }
   }, [])
 
   const handleRestart = useCallback(() => {
@@ -1745,18 +1839,41 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
           ))}
         </div>
 
-        <div className="ml-auto flex min-w-[240px] items-center gap-3">
-          <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-800/70">
+        <div className="ml-auto flex min-w-[280px] items-center gap-3">
+          <div
+            ref={progressTrackRef}
+            role="slider"
+            aria-label="Playback position"
+            aria-valuemin={0}
+            aria-valuemax={Number(totalDuration.toFixed(1))}
+            aria-valuenow={Number(currentTime.toFixed(1))}
+            className="group relative flex-1 cursor-pointer py-2"
+            onPointerDown={handleSeekPointerDown}
+            onPointerMove={handleSeekPointerMove}
+            onPointerUp={handleSeekPointerUp}
+            onPointerCancel={handleSeekPointerUp}
+          >
+            <div className="h-2 overflow-hidden rounded-full bg-slate-800/70">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${progressPct}%`,
+                  background: 'linear-gradient(90deg, #34d399 0%, #7dd3fc 55%, #a78bfa 100%)',
+                }}
+              />
+            </div>
             <div
-              className="h-full rounded-full"
+              className="pointer-events-none absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full opacity-0 transition-opacity group-hover:opacity-100"
               style={{
-                width: `${progressPct}%`,
-                background: 'linear-gradient(90deg, #34d399 0%, #7dd3fc 55%, #a78bfa 100%)',
+                left: `${progressPct}%`,
+                background: COLORS.text,
+                boxShadow: `0 0 0 3px ${withAlpha('#7dd3fc', 0.35)}`,
+                opacity: isSeekingRef.current ? 1 : undefined,
               }}
             />
           </div>
-          <span className="w-14 text-right text-xs font-medium" style={{ color: COLORS.textMuted }}>
-            {currentTime.toFixed(1)}s
+          <span className="w-24 text-right text-xs font-medium tabular-nums" style={{ color: COLORS.textMuted }}>
+            {currentTime.toFixed(1)}s / {totalDuration.toFixed(1)}s
           </span>
         </div>
       </div>
@@ -1794,15 +1911,34 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
           >
             {activeStepTheme.badge}
           </div>
-          <div className="text-[11px] font-semibold tracking-[0.18em]" style={{ color: COLORS.textMuted }}>
-            CURRENT STEP
+          <div className="flex items-center gap-1.5">
+            <span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{
+                background: STEP_STATE_COLORS[activeEdgeStatus.state],
+                boxShadow: activeEdgeStatus.state === 'running'
+                  ? `0 0 0 3px ${withAlpha(STEP_STATE_COLORS.running, 0.22)}`
+                  : 'none',
+              }}
+            />
+            <span
+              className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+              style={{ color: activeEdgeStatus.state === 'running' ? COLORS.text : COLORS.textMuted }}
+            >
+              {activeEdgeStatus.stateLabel}
+            </span>
           </div>
+          {activeEdgeStatus.stepNumber && (
+            <div className="ml-auto text-[11px] font-medium tabular-nums" style={{ color: COLORS.textMuted }}>
+              {activeEdgeStatus.stepNumber} / {activeEdgeStatus.totalSteps}
+            </div>
+          )}
         </div>
         <div className="mb-3">
-          <div className="text-sm font-semibold" style={{ color: COLORS.text }}>
+          <div className="text-sm font-semibold leading-5" style={{ color: COLORS.text }}>
             {activeEdgeStatus.title}
           </div>
-          {activeEdgeStatus.summary && (
+          {activeEdgeStatus.route && (
             <div
               className="mt-2 rounded-xl border px-3 py-2 text-[12px] font-medium"
               style={{
@@ -1811,12 +1947,22 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
                 color: COLORS.text,
               }}
             >
-              {activeEdgeStatus.summary}
+              {activeEdgeStatus.phase} · {activeEdgeStatus.route}
             </div>
           )}
-          <div className="mt-1 leading-5" style={{ color: COLORS.textDim }}>
-            {activeEdgeStatus.detail}
-          </div>
+          {activeEdgeStatus.detail && (
+            <div className="mt-2 leading-5" style={{ color: COLORS.textDim }}>
+              {activeEdgeStatus.detail}
+            </div>
+          )}
+          {activeEdgeStatus.nextUp && (
+            <div className="mt-2 flex items-baseline gap-1.5 leading-5">
+              <span className="text-[10px] font-semibold tracking-[0.18em]" style={{ color: COLORS.textMuted }}>
+                NEXT
+              </span>
+              <span style={{ color: COLORS.textMuted }}>{activeEdgeStatus.nextUp}</span>
+            </div>
+          )}
         </div>
         <div className="border-t pt-3" style={{ borderColor: withAlpha(activeStepTheme.accent, 0.18) }}>
           <div className="mb-2 text-[11px] font-semibold tracking-[0.18em]" style={{ color: COLORS.textMuted }}>
