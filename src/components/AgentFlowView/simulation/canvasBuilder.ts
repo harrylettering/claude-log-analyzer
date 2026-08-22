@@ -65,6 +65,33 @@ export interface VirtualNode {
   callLinks: CanvasEdge[]
 }
 
+export type FlowCycleKind = 'user_input' | 'thinking' | 'tool_call' | 'response' | 'other'
+
+/**
+ * 一个回合 = trace 里一件完整的事，内部是有序的若干跳。
+ * 工具调用回合有 4 跳：模型请求 → harness 派发 → 工具返回 → 结果回灌。
+ * 这样时间轴按回合推进，既保留 4 跳的执行逻辑，又不会把一次调用摊成 4 个步骤。
+ */
+export interface FlowCycle {
+  id: string
+  kind: FlowCycleKind
+  title: string
+  toolName?: string
+  hops: CanvasEdge[]
+  entryUuids: string[]
+  startedAt?: string
+  endedAt?: string
+  isError?: boolean
+}
+
+/** 没有语义的环境事件（attachment / system），不进时间轴，只做计数与刻度。 */
+export interface SystemEvent {
+  uuid: string
+  kind: string
+  timestamp?: string
+  label: string
+}
+
 // ─── Helper Functions ───────────────────────────────────────────────────────────
 
 function parseContentType(item: Record<string, unknown>): { contentType: ContentType; toolName?: string } {
@@ -161,6 +188,14 @@ function summarizeMessageContent(contentType: ContentType, item: Record<string, 
   return ''
 }
 
+const CYCLE_FALLBACK_TITLE: Record<FlowCycleKind, string> = {
+  user_input: 'User request',
+  thinking: 'Model reasoning',
+  tool_call: 'Tool call',
+  response: 'Response to user',
+  other: 'Agent event',
+}
+
 // ─── CanvasBuilder Class ───────────────────────────────────────────────────────
 
 export class CanvasBuilder {
@@ -172,13 +207,27 @@ export class CanvasBuilder {
   private toolNames: Map<string, string> = new Map()
   private toolOrder: Map<string, number> = new Map()
   private toolSequence = 0
+  private edgeSequence = 0
+  private cycles: FlowCycle[] = []
+  private pendingToolCycles: Map<string, FlowCycle> = new Map()
+  private systemEvents: SystemEvent[] = []
 
   /**
    * Build canvas graph from log entries
    */
   buildCanvasGraph(entries: LogEntry[]): void {
     this.buildNodes(entries)
+    this.registerCycleEdges()
     this.buildLayers()
+  }
+
+  /** 只有属于某个回合的跳才是画布上的边；环境事件与被抹掉的推理不进图。 */
+  private registerCycleEdges(): void {
+    for (const cycle of this.cycles) {
+      for (const hop of cycle.hops) {
+        this.canvasEdges.set(hop.id, hop)
+      }
+    }
   }
 
   /**
@@ -257,11 +306,7 @@ export class CanvasBuilder {
           }
         }
 
-        for (const edge of virtualNode.callLinks) {
-          if (!this.canvasEdges.has(edge.id)) {
-            this.canvasEdges.set(edge.id, edge)
-          }
-        }
+        this.collectCycle(entry, virtualNode, role, contentType, item, toolName)
       }
     }
   }
@@ -454,6 +499,93 @@ export class CanvasBuilder {
     }
   }
 
+  /**
+   * 把一条 entry 归入一个回合。工具调用的后两跳（工具返回、结果回灌）会追加到
+   * 发起它的那个回合上，靠 tool_use_id 配对。
+   */
+  private collectCycle(
+    entry: LogEntry,
+    virtualNode: VirtualNode,
+    role: Role,
+    contentType: ContentType,
+    item: Record<string, unknown> | null,
+    toolName: string | undefined
+  ): void {
+    const timestamp = entry.timestamp
+    const uuid = virtualNode.uuid
+
+    if (role === Role.ATTACHMENT || role === Role.SYSTEM) {
+      this.systemEvents.push({
+        uuid,
+        kind: entry.type || `${role}`,
+        timestamp,
+        label: role === Role.SYSTEM ? 'System event' : 'Context attachment',
+      })
+      return
+    }
+
+    if (virtualNode.callLinks.length === 0) return
+
+    // Claude Code 会把 thinking 内容抹掉只留 signature。没有文本的推理块不值得
+    // 占一个回合（否则是几十个一模一样的自环），只记成标记；有文本的照常成为回合。
+    if (role === Role.ASSISTANT && contentType === ContentType.THINKING) {
+      const thinkingText = typeof item?.thinking === 'string' ? item.thinking.trim() : ''
+      if (!thinkingText) {
+        this.systemEvents.push({
+          uuid,
+          kind: 'thinking',
+          timestamp,
+          label: 'Model reasoning (content not recorded)',
+        })
+        return
+      }
+    }
+
+    if (role === Role.USER && contentType === ContentType.TOOL_RESULT && item) {
+      const toolUseId = item.tool_use_id as string
+      const pending = this.pendingToolCycles.get(toolUseId)
+      if (pending) {
+        pending.hops.push(...virtualNode.callLinks)
+        pending.entryUuids.push(uuid)
+        pending.endedAt = timestamp
+        pending.isError = Boolean(item.is_error)
+        this.pendingToolCycles.delete(toolUseId)
+        return
+      }
+    }
+
+    const firstSummary = virtualNode.callLinks[0]?.actionSummary
+    const kind: FlowCycleKind =
+      role === Role.ASSISTANT && contentType === ContentType.THINKING
+        ? 'thinking'
+        : role === Role.ASSISTANT && contentType === ContentType.TOOL_USE
+          ? 'tool_call'
+          : role === Role.ASSISTANT && (contentType === ContentType.TEXT || contentType === ContentType.IMAGE)
+            ? 'response'
+            : role === Role.USER && (contentType === ContentType.TEXT || contentType === ContentType.IMAGE)
+              ? 'user_input'
+              : role === Role.USER && contentType === ContentType.TOOL_RESULT
+                ? 'tool_call'
+                : 'other'
+
+    const cycle: FlowCycle = {
+      id: uuid,
+      kind,
+      title: firstSummary || CYCLE_FALLBACK_TITLE[kind],
+      toolName: kind === 'tool_call' ? toolName ?? this.toolNames.get((item?.tool_use_id as string) ?? '') : undefined,
+      hops: [...virtualNode.callLinks],
+      entryUuids: [uuid],
+      startedAt: timestamp,
+      endedAt: kind === 'tool_call' ? undefined : timestamp,
+    }
+    this.cycles.push(cycle)
+
+    if (kind === 'tool_call' && contentType === ContentType.TOOL_USE && item) {
+      const toolId = item.id as string
+      if (toolId) this.pendingToolCycles.set(toolId, cycle)
+    }
+  }
+
   private makeNode(entityType: CanvasNode['entityType'], entityId: string, displayName: string): CanvasNode {
     return { entityType, entityId, displayName, x: 0, y: 0 }
   }
@@ -465,7 +597,9 @@ export class CanvasBuilder {
     actionSummary?: string,
     actionDetail?: string
   ): CanvasEdge {
-    return { id: `${source}-${target}`, source, target, linkType, actionSummary, actionDetail }
+    // id 必须每跳唯一：`${source}-${target}` 会让 assistant/main agent/user 之间的边
+    // 在整条 trace 里只剩一条，43 次交接会被压成 1 次。
+    return { id: `${source}-${target}#${this.edgeSequence++}`, source, target, linkType, actionSummary, actionDetail }
   }
 
   /**
@@ -650,6 +784,15 @@ export class CanvasBuilder {
 
   getLayers(): { level: number; nodes: VirtualNode[] }[] {
     return this.layers
+  }
+
+  /** 时间轴的唯一来源：按文件顺序（即时间顺序）排好的回合列表。 */
+  getCycles(): FlowCycle[] {
+    return this.cycles
+  }
+
+  getSystemEvents(): SystemEvent[] {
+    return this.systemEvents
   }
 
   getVirtualNodes(): Map<string, VirtualNode> {
