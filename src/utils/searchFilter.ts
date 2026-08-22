@@ -48,7 +48,11 @@ function createQueryMatcher(
   const readText = caseSensitive ? getEntrySearchText : getEntrySearchTextLower;
 
   if (searchMode === 'exact') {
-    return (entry) => readText(entry) === needle;
+    // "Exact Match" means the whole term, not the whole entry: comparing the
+    // query against an entry's entire serialized payload could never match.
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const wordBoundary = new RegExp(`(^|[^\\w])${escaped}($|[^\\w])`, caseSensitive ? '' : 'i');
+    return (entry) => wordBoundary.test(getEntrySearchText(entry));
   }
 
   return (entry) => readText(entry).includes(needle);
@@ -127,16 +131,22 @@ function matchesToolName(
 
 // Check whether the entry falls inside the selected time range.
 function matchesTimeRange(entry: LogEntry, timeRange: { startTime?: string; endTime?: string }): boolean {
+  if (!timeRange.startTime && !timeRange.endTime) return true;
+
+  // Session metadata (mode, ai-title, file-history-snapshot, …) carries no
+  // timestamp, and NaN fails every comparison — so an undated entry would slip
+  // through any window, including one it cannot possibly belong to.
   const entryTime = new Date(entry.timestamp).getTime();
+  if (Number.isNaN(entryTime)) return false;
 
   if (timeRange.startTime) {
     const startTime = new Date(timeRange.startTime).getTime();
-    if (entryTime < startTime) return false;
+    if (!Number.isNaN(startTime) && entryTime < startTime) return false;
   }
 
   if (timeRange.endTime) {
     const endTime = new Date(timeRange.endTime).getTime();
-    if (entryTime > endTime) return false;
+    if (!Number.isNaN(endTime) && entryTime > endTime) return false;
   }
 
   return true;
