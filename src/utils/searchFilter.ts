@@ -70,19 +70,57 @@ function matchesMessageType(entry: LogEntry, types: MessageTypeFilter[]): boolea
   return types.includes(entry.type as MessageTypeFilter);
 }
 
-// Check whether the tool name matches.
-function matchesToolName(entry: LogEntry, toolNames: string[]): boolean {
+/**
+ * Map every tool_use id to its tool name.
+ *
+ * A tool_result block only carries the id of the call it answers, so it can
+ * only be attributed to a tool by looking the id up here. Without this, a
+ * tool-name filter drops every result and shows just half of what it should.
+ */
+function collectToolUseNames(entries: LogEntry[]): Map<string, string> {
+  const names = new Map<string, string>();
+
+  for (const entry of entries) {
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content as any[]) {
+      if (!block || (block.type !== 'tool_use' && !block.tool_use)) continue;
+      const toolUse = block.tool_use || block;
+      const name = toolUse.name || toolUse.tool_name;
+      const id = toolUse.id || toolUse.tool_use_id;
+      if (name && id) names.set(id, name);
+    }
+  }
+
+  return names;
+}
+
+// Check whether the tool name matches, on both the call and its result.
+function matchesToolName(
+  entry: LogEntry,
+  toolNames: string[],
+  toolUseNames: Map<string, string>
+): boolean {
   if (toolNames.length === 0) return true;
 
   const content = entry.message?.content;
   if (!Array.isArray(content)) return false;
 
   return content.some((c: any) => {
+    if (!c) return false;
+
     if (c.type === 'tool_use' || c.tool_use) {
       const toolUse = c.tool_use || c;
       const name = toolUse.name || toolUse.tool_name;
-      return name && toolNames.includes(name);
+      return Boolean(name) && toolNames.includes(name);
     }
+
+    if (c.type === 'tool_result') {
+      const name = toolUseNames.get(c.tool_use_id);
+      return name !== undefined && toolNames.includes(name);
+    }
+
     return false;
   });
 }
@@ -198,12 +236,17 @@ export function filterEntries(
     filters.caseSensitive
   );
 
+  // Results reference their call by id, so the ids have to be resolved before
+  // the single filtering pass can attribute them to a tool.
+  const toolUseNames =
+    filters.toolNames.length > 0 ? collectToolUseNames(entries) : new Map<string, string>();
+
   for (const entry of entries) {
     // Message-type filter.
     if (!matchesMessageType(entry, filters.messageTypes)) continue;
 
     // Tool-name filter.
-    if (!matchesToolName(entry, filters.toolNames)) continue;
+    if (!matchesToolName(entry, filters.toolNames, toolUseNames)) continue;
 
     // Time-range filter.
     if (!matchesTimeRange(entry, filters.timeRange)) continue;
