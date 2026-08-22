@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { BarChart2, MessageSquare, Clock, Zap, AlertCircle, Loader2, GitMerge, Sparkles, Activity, Terminal, Search, HardDrive, PlayCircle, Upload, Share2, Calendar } from 'lucide-react'
+import { BarChart2, MessageSquare, Clock, Zap, AlertCircle, Loader2, GitMerge, Sparkles, Activity, Terminal, Search, HardDrive, PlayCircle, Upload, Share2, Calendar, Copy, Check } from 'lucide-react'
 import { appendLogContent, createLogSession } from './utils/logParser'
 import type { ParsedLogData } from './types/log'
 import { FileUpload } from './components/FileUpload'
@@ -12,6 +12,9 @@ import { PromptOptimizer } from './components/PromptOptimizer'
 import { AgentFlowView } from './components/AgentFlowView'
 
 type ViewId = 'overview' | 'tokens' | 'timeline' | 'conversation' | 'compare' | 'prompt-optimizer' | 'agent-flow'
+
+/** Discovery entries carry the file name; the session id is that without the extension. */
+const getSessionId = (fileName: string) => fileName.replace(/\.jsonl$/, '')
 
 const navItems: { id: ViewId; label: string; icon: React.ReactNode }[] = [
   { id: 'agent-flow', label: 'Agent Flow', icon: <Share2 className="w-4 h-4" /> },
@@ -37,6 +40,9 @@ export default function App() {
   const [discoveryList, setDiscoveryList] = useState<any[]>([])
   const [manualPath, setManualPath] = useState('')
   const [scanWindowHours, setScanWindowHours] = useState<number>(24)
+  // Session id most recently copied, so the card can confirm the copy landed.
+  const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null)
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const activePathRef = useRef<string | null>(null)
   const offlineLogContentRef = useRef<string | null>(null)
@@ -105,6 +111,49 @@ export default function App() {
 
     return () => ws.close()
   }, [resetClaudeCliAnalysis])
+
+  useEffect(() => () => {
+    if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+  }, [])
+
+  const copySessionId = useCallback(async (sessionId: string) => {
+    // writeText is unavailable outside a secure context and throws when the
+    // document is not focused, so treat any failure as a reason to fall back.
+    let copied = false
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(sessionId)
+        copied = true
+      } catch {
+        copied = false
+      }
+    }
+
+    if (!copied) {
+      const helper = document.createElement('textarea')
+      helper.value = sessionId
+      helper.setAttribute('readonly', '')
+      helper.style.position = 'fixed'
+      helper.style.opacity = '0'
+      document.body.appendChild(helper)
+      helper.select()
+      try {
+        copied = document.execCommand('copy')
+      } catch {
+        copied = false
+      }
+      document.body.removeChild(helper)
+    }
+
+    if (!copied) {
+      console.error('[Clipboard] Failed to copy session id', sessionId)
+      return
+    }
+
+    setCopiedSessionId(sessionId)
+    if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+    copyResetTimerRef.current = setTimeout(() => setCopiedSessionId(null), 1600)
+  }, [])
 
   const startWatching = (path: string) => {
     if (wsRef.current && isWsConnected) {
@@ -231,10 +280,18 @@ export default function App() {
         {/* Auto-discovered session list */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {discoveryList.map(session => (
-            <button
+            <div
               key={session.fullPath}
+              role="button"
+              tabIndex={0}
               onClick={() => startWatching(session.fullPath)}
-              className="flex flex-col text-left p-6 rounded-3xl border border-slate-800 bg-slate-900/40 hover:bg-slate-800/60 hover:border-blue-500/50 transition-all group relative overflow-hidden shadow-2xl backdrop-blur-sm"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  startWatching(session.fullPath)
+                }
+              }}
+              className="flex flex-col text-left p-6 rounded-3xl border border-slate-800 bg-slate-900/40 hover:bg-slate-800/60 hover:border-blue-500/50 transition-all group relative overflow-hidden shadow-2xl backdrop-blur-sm cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
             >
               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
               
@@ -262,10 +319,29 @@ export default function App() {
 
               <div className="mb-6 space-y-2">
                 <div>
-                  <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest block mb-1">JSONL File</span>
-                  <p className="text-[10px] text-slate-400 font-mono break-all bg-black/30 p-2 rounded-lg border border-slate-800/50">
-                    {session.id}
-                  </p>
+                  <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest block mb-1">Session ID</span>
+                  <div className="flex items-stretch gap-2">
+                    <p className="flex-1 min-w-0 text-[10px] text-slate-400 font-mono break-all bg-black/30 p-2 rounded-lg border border-slate-800/50">
+                      {getSessionId(session.id)}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        // The whole card is clickable; keep copying from opening the session.
+                        e.stopPropagation()
+                        copySessionId(getSessionId(session.id))
+                      }}
+                      title="Copy session ID"
+                      aria-label={`Copy session ID ${getSessionId(session.id)}`}
+                      className="shrink-0 px-2 rounded-lg border border-slate-800/50 bg-black/30 text-slate-500 hover:text-blue-400 hover:border-blue-500/40 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
+                    >
+                      {copiedSessionId === getSessionId(session.id) ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
               
@@ -278,7 +354,7 @@ export default function App() {
                    Watch Session <PlayCircle className="w-4 h-4" />
                 </div>
               </div>
-            </button>
+            </div>
           ))}
           
           {discoveryList.length === 0 && (
