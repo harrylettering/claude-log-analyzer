@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CanvasBuilder } from './simulation/canvasBuilder'
+import type { FlowCycleKind } from './simulation/canvasBuilder'
 import { compactPaths } from './lib/pathText'
 import type { ParsedLogData } from '../../types/log'
 
@@ -42,6 +43,19 @@ type ActiveParticle = {
   color: string
 }
 
+type EdgeCyclePosition = {
+  cycleNumber: number
+  cycleTitle: string
+  cycleKind: FlowCycleKind
+  hopIndex: number
+  hopCount: number
+}
+
+type OrderedEdge = {
+  edge: CanvasEdgeData
+  time: number
+}
+
 type StepState = 'running' | 'done' | 'idle'
 
 type EdgeStatus = {
@@ -52,8 +66,10 @@ type EdgeStatus = {
   phase?: string
   route?: string
   detail?: string
-  stepNumber?: number
-  totalSteps: number
+  cycleNumber?: number
+  cycleTotal: number
+  hopIndex?: number
+  hopCount?: number
   nextUp?: string
 }
 
@@ -164,11 +180,14 @@ const LANE_LABELS = [
 ]
 
 const SPEED_OPTIONS = [0.25, 0.5, 1, 2]
-const PARTICLE_DURATION = 1.15
+// 一跳的粒子动画时长，必须短于 HOP_INTERVAL，否则同一回合内相邻两跳会同时激活
+const PARTICLE_DURATION = 0.42
 const POST_FADE_DURATION = 0.38
 const CAMERA_LERP = 0.12
-const STEP_INTERVAL = 1.7
-const SCENE_HOLD_DURATION = 0.42
+// 回合内每跳的间隔，以及回合之间的停顿
+const HOP_INTERVAL = 0.5
+const CYCLE_GAP = 0.55
+const SCENE_HOLD_DURATION = 0.3
 const SCENE_SHIFT_DISTANCE = 260
 const SCENE_SHIFT_Y_DISTANCE = 92
 
@@ -1062,33 +1081,51 @@ function getEdgeRoute(edge: CanvasEdgeData, nodes: Map<string, CanvasNodeData>) 
   return `${sourceName} -> ${targetName}`
 }
 
+/** 时间轴上最后一个开始时间 <= currentTime 的跳；-1 表示还没开始。 */
+function findEdgeIndexAtOrBefore(orderedEdges: OrderedEdge[], currentTime: number) {
+  let low = 0
+  let high = orderedEdges.length - 1
+  let result = -1
+  while (low <= high) {
+    const mid = (low + high) >> 1
+    if (orderedEdges[mid].time <= currentTime) {
+      result = mid
+      low = mid + 1
+    } else {
+      high = mid - 1
+    }
+  }
+  return result
+}
+
 function getEdgeStatusAtTime(
   currentTime: number,
-  edges: Map<string, CanvasEdgeData>,
-  edgeTiming: Map<string, number>,
+  orderedEdges: OrderedEdge[],
+  edgeCycle: Map<string, EdgeCyclePosition>,
+  cycleTotal: number,
   nodes: Map<string, CanvasNodeData>
 ): EdgeStatus {
-  const orderedEdges = [...edges.values()]
-    .map((edge) => ({ edge, time: edgeTiming.get(edge.id) }))
-    .filter((item): item is { edge: CanvasEdgeData; time: number } => item.time !== undefined)
-    .sort((a, b) => a.time - b.time)
-
-  const totalSteps = orderedEdges.length
-  const active = orderedEdges.find(({ time }) => currentTime >= time && currentTime <= time + PARTICLE_DURATION)
-  const previous = [...orderedEdges].reverse().find(({ time }) => time <= currentTime)
-  const next = orderedEdges.find(({ time }) => time > currentTime)
-  const nextUp = next
-    ? `${getEdgePhaseLabel(next.edge.linkType)} · ${getEdgeRoute(next.edge, nodes)}`
-    : undefined
+  const index = findEdgeIndexAtOrBefore(orderedEdges, currentTime)
+  const previous = index >= 0 ? orderedEdges[index] : undefined
+  const active = previous && currentTime <= previous.time + PARTICLE_DURATION ? previous : undefined
 
   const focus = active ?? previous
+  const focusCycle = focus ? edgeCycle.get(focus.edge.id) : undefined
+  const nextCycleEdge = orderedEdges
+    .slice(index + 1)
+    .find((item) => edgeCycle.get(item.edge.id)?.cycleNumber !== focusCycle?.cycleNumber)
+  const nextCycle = nextCycleEdge ? edgeCycle.get(nextCycleEdge.edge.id) : undefined
+  const nextUp = nextCycle
+    ? `Cycle ${nextCycle.cycleNumber} · ${truncateStepText(nextCycle.cycleTitle, 52)}`
+    : undefined
+
   if (!focus) {
     return {
       edgeId: null,
       state: 'idle',
       stateLabel: 'Standby',
-      title: 'Waiting for the first call',
-      totalSteps,
+      title: 'Waiting for the first cycle',
+      cycleTotal,
       nextUp,
     }
   }
@@ -1098,13 +1135,15 @@ function getEdgeStatusAtTime(
   return {
     edgeId: edge.id,
     state: active ? 'running' : 'done',
-    stateLabel: active ? 'Running' : next ? 'Completed' : 'Flow complete',
+    stateLabel: active ? 'Running' : nextCycle ? 'Completed' : 'Flow complete',
     title: truncateStepText(edge.actionSummary, 88) ?? phase,
     phase,
     route: getEdgeRoute(edge, nodes),
     detail: edge.actionDetail ? truncateStepText(edge.actionDetail, 140) : undefined,
-    stepNumber: edge.seqNum || undefined,
-    totalSteps,
+    cycleNumber: focusCycle?.cycleNumber,
+    cycleTotal,
+    hopIndex: focusCycle?.hopIndex,
+    hopCount: focusCycle?.hopCount,
     nextUp,
   }
 }
@@ -1133,40 +1172,24 @@ function getStepTheme(edge: CanvasEdgeData | null, nodes: Map<string, CanvasNode
   }
 }
 
-function getActiveEdgeAtTime(
-  currentTime: number,
-  edges: Map<string, CanvasEdgeData>,
-  edgeTiming: Map<string, number>
-) {
-  for (const edge of edges.values()) {
-    const time = edgeTiming.get(edge.id)
-    if (time !== undefined && currentTime >= time && currentTime <= time + PARTICLE_DURATION) {
-      return edge
-    }
-  }
-  return null
+function getActiveEdgeAtTime(currentTime: number, orderedEdges: OrderedEdge[]) {
+  const index = findEdgeIndexAtOrBefore(orderedEdges, currentTime)
+  if (index < 0) return null
+  const candidate = orderedEdges[index]
+  return currentTime <= candidate.time + PARTICLE_DURATION ? candidate.edge : null
 }
 
-function getLastEdgeBeforeTime(
-  currentTime: number,
-  edges: Map<string, CanvasEdgeData>,
-  edgeTiming: Map<string, number>
-) {
-  let bestEdge: CanvasEdgeData | null = null
-  let bestTime = Number.NEGATIVE_INFINITY
-  for (const edge of edges.values()) {
-    const time = edgeTiming.get(edge.id)
-    if (time !== undefined && time <= currentTime && time > bestTime) {
-      bestTime = time
-      bestEdge = edge
-    }
-  }
-  return bestEdge
+function getLastEdgeBeforeTime(currentTime: number, orderedEdges: OrderedEdge[]) {
+  const index = findEdgeIndexAtOrBefore(orderedEdges, currentTime)
+  return index >= 0 ? orderedEdges[index].edge : null
 }
 
-function getEdgeOffset(edge: CanvasEdgeData, edges: Map<string, CanvasEdgeData>) {
-  const reverseId = `${edge.target}-${edge.source}`
-  if (!edges.has(reverseId)) return 0
+/**
+ * 双向边要左右分开，否则去程与回程完全重叠。用 source/target 对判断，
+ * 不能用边 id —— 边 id 现在带唯一后缀。
+ */
+function getEdgeOffset(edge: CanvasEdgeData, edgePairs: Set<string>) {
+  if (!edgePairs.has(`${edge.target}->${edge.source}`)) return 0
   return edge.source < edge.target ? -42 : 42
 }
 
@@ -1251,6 +1274,11 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
   const edgeSceneRef = useRef<Map<string, number>>(new Map())
   const nodeSceneRef = useRef<Map<string, number>>(new Map())
   const sceneInfoRef = useRef<Map<number, SceneInfo>>(new Map())
+  const edgePairsRef = useRef<Set<string>>(new Set())
+  const edgeCycleRef = useRef<Map<string, EdgeCyclePosition>>(new Map())
+  const orderedEdgesRef = useRef<OrderedEdge[]>([])
+  const cycleCountRef = useRef(0)
+  const systemEventCountRef = useRef(0)
   const totalDurationRef = useRef(0)
 
   const isPlayingRef = useRef(false)
@@ -1284,8 +1312,14 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
     activeParticlesRef.current = particles
   }, [])
 
-  const activeEdge = getActiveEdgeAtTime(currentTime, canvasEdgesRef.current, edgeTimingRef.current)
-  const activeEdgeStatus = getEdgeStatusAtTime(currentTime, canvasEdgesRef.current, edgeTimingRef.current, canvasNodesRef.current)
+  const activeEdge = getActiveEdgeAtTime(currentTime, orderedEdgesRef.current)
+  const activeEdgeStatus = getEdgeStatusAtTime(
+    currentTime,
+    orderedEdgesRef.current,
+    edgeCycleRef.current,
+    cycleCountRef.current,
+    canvasNodesRef.current
+  )
   const statusThemeEdge = activeEdgeStatus.edgeId ? canvasEdgesRef.current.get(activeEdgeStatus.edgeId) ?? activeEdge : activeEdge
   const activeStepTheme = getStepTheme(statusThemeEdge ?? null, canvasNodesRef.current)
 
@@ -1347,58 +1381,53 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
     builder.initializePositions(dimensions.width, dimensions.height)
 
     const nodes = builder.getCanvasNodes()
-    const rawEdges = builder.getCanvasEdges()
-    const layers = builder.getLayers()
+    const cycles = builder.getCycles()
 
-    const seenEdgeIds = new Set<string>()
-    const edgeSequence = new Map<string, number>()
+    const edges = new Map<string, CanvasEdgeData>()
     const edgeTiming = new Map<string, number>()
     const nodeTiming = new Map<string, number>()
     const edgeScene = new Map<string, number>()
     const nodeScene = new Map<string, number>()
     const sceneInfo = new Map<number, SceneInfo>()
+    const edgePairs = new Set<string>()
+    const edgeCycle = new Map<string, EdgeCyclePosition>()
+    const orderedEdges: OrderedEdge[] = []
 
-    let seqNum = 1
     let time = 0
-    let sceneId = 0
 
-    for (const layer of layers) {
-      for (const virtualNode of layer.nodes) {
-        for (const link of virtualNode.callLinks) {
-          if (!seenEdgeIds.has(link.id)) {
-            seenEdgeIds.add(link.id)
-            edgeSequence.set(link.id, seqNum++)
-            edgeTiming.set(link.id, time)
-            edgeScene.set(link.id, sceneId)
-            if (!nodeScene.has(link.source)) nodeScene.set(link.source, sceneId)
-            if (!nodeScene.has(link.target)) nodeScene.set(link.target, sceneId)
-            nodeTiming.set(link.source, Math.min(nodeTiming.get(link.source) ?? Number.POSITIVE_INFINITY, time))
-            nodeTiming.set(link.target, Math.min(nodeTiming.get(link.target) ?? Number.POSITIVE_INFINITY, time + 0.08))
+    cycles.forEach((cycle, cycleIndex) => {
+      const sceneId = cycleIndex
+      const sceneStart = time
 
-            const currentScene = sceneInfo.get(sceneId) ?? { sceneId, startTime: time, endTime: time + PARTICLE_DURATION }
-            currentScene.startTime = Math.min(currentScene.startTime, time)
-            currentScene.endTime = time + PARTICLE_DURATION
-            sceneInfo.set(sceneId, currentScene)
+      cycle.hops.forEach((hop, hopIndex) => {
+        const edge: CanvasEdgeData = { ...hop, seqNum: cycleIndex + 1 }
+        edges.set(hop.id, edge)
+        edgeTiming.set(hop.id, time)
+        edgeScene.set(hop.id, sceneId)
+        edgePairs.add(`${hop.source}->${hop.target}`)
+        edgeCycle.set(hop.id, {
+          cycleNumber: cycleIndex + 1,
+          cycleTitle: cycle.title,
+          cycleKind: cycle.kind,
+          hopIndex,
+          hopCount: cycle.hops.length,
+        })
+        orderedEdges.push({ edge, time })
 
-            time += STEP_INTERVAL
+        if (!nodeScene.has(hop.source)) nodeScene.set(hop.source, sceneId)
+        if (!nodeScene.has(hop.target)) nodeScene.set(hop.target, sceneId)
+        nodeTiming.set(hop.source, Math.min(nodeTiming.get(hop.source) ?? Number.POSITIVE_INFINITY, time))
+        nodeTiming.set(hop.target, Math.min(nodeTiming.get(hop.target) ?? Number.POSITIVE_INFINITY, time + 0.06))
 
-            if (link.target === '1' && link.source !== link.target) {
-              const holdScene = sceneInfo.get(sceneId)
-              if (holdScene) {
-                holdScene.endTime += SCENE_HOLD_DURATION
-                sceneInfo.set(sceneId, holdScene)
-              }
-              time += SCENE_HOLD_DURATION
-              sceneId += 1
-            }
-          }
-        }
-      }
-    }
+        time += HOP_INTERVAL
+      })
 
-    const edges = new Map<string, CanvasEdgeData>()
-    rawEdges.forEach((edge, key) => {
-      edges.set(key, { ...edge, seqNum: edgeSequence.get(key) ?? 0 })
+      sceneInfo.set(sceneId, {
+        sceneId,
+        startTime: sceneStart,
+        endTime: time - HOP_INTERVAL + PARTICLE_DURATION + SCENE_HOLD_DURATION,
+      })
+      time += CYCLE_GAP
     })
 
     canvasNodesRef.current = nodes
@@ -1408,7 +1437,12 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
     edgeSceneRef.current = edgeScene
     nodeSceneRef.current = nodeScene
     sceneInfoRef.current = sceneInfo
-    totalDurationRef.current = Math.max(time + 0.9, 1.8)
+    edgePairsRef.current = edgePairs
+    edgeCycleRef.current = edgeCycle
+    orderedEdgesRef.current = orderedEdges
+    cycleCountRef.current = cycles.length
+    systemEventCountRef.current = builder.getSystemEvents().length
+    totalDurationRef.current = Math.max(time + 0.6, 1.8)
     currentTimeRef.current = 0
     setCurrentTime(0)
     isPlayingRef.current = true
@@ -1544,7 +1578,7 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       const source = placeNodeInScene(rawSource)
       const target = placeNodeInScene(rawTarget)
       const color = EDGE_COLORS[edge.linkType] ?? COLORS.accent
-      const edgeOffset = getEdgeOffset(edge, canvasEdgesRef.current)
+      const edgeOffset = getEdgeOffset(edge, edgePairsRef.current)
 
       if (edge.source === edge.target) {
         drawSelfLoop(ctx, source, color, renderAlpha, timing.active)
@@ -1584,7 +1618,7 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
         placeNodeInScene(rawTarget),
         particle.progress,
         particle.color,
-        getEdgeOffset(edge, canvasEdgesRef.current)
+        getEdgeOffset(edge, edgePairsRef.current)
       )
     })
 
@@ -1632,12 +1666,12 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
       currentTimeRef.current = Math.min(duration, currentTimeRef.current + delta * speedRef.current)
       setCurrentTime(currentTimeRef.current)
 
-      const activeEdge = getActiveEdgeAtTime(currentTimeRef.current, canvasEdgesRef.current, edgeTimingRef.current)
+      const activeEdge = getActiveEdgeAtTime(currentTimeRef.current, orderedEdgesRef.current)
       if (activeEdge && !isDraggingRef.current) {
         const source = canvasNodesRef.current.get(activeEdge.source)
         const target = canvasNodesRef.current.get(activeEdge.target)
         if (source && target) {
-          const path = getEdgePath(source, target, getEdgeOffset(activeEdge, canvasEdgesRef.current))
+          const path = getEdgePath(source, target, getEdgeOffset(activeEdge, edgePairsRef.current))
           const focusX = path.start.x
           const focusY = path.start.y
           setCamera((prev) => {
@@ -1689,13 +1723,13 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
     syncParticlesAtTime(nextTime)
 
     const edge =
-      getActiveEdgeAtTime(nextTime, canvasEdgesRef.current, edgeTimingRef.current) ??
-      getLastEdgeBeforeTime(nextTime, canvasEdgesRef.current, edgeTimingRef.current)
+      getActiveEdgeAtTime(nextTime, orderedEdgesRef.current) ??
+      getLastEdgeBeforeTime(nextTime, orderedEdgesRef.current)
     if (!edge) return
     const source = canvasNodesRef.current.get(edge.source)
     const target = canvasNodesRef.current.get(edge.target)
     if (!source || !target) return
-    const path = getEdgePath(source, target, getEdgeOffset(edge, canvasEdgesRef.current))
+    const path = getEdgePath(source, target, getEdgeOffset(edge, edgePairsRef.current))
     setCamera((prev) => constrainCamera({
       scale: prev.scale,
       offsetX: dimensions.width / 2 - path.start.x * prev.scale,
@@ -1928,9 +1962,9 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
               {activeEdgeStatus.stateLabel}
             </span>
           </div>
-          {activeEdgeStatus.stepNumber && (
+          {activeEdgeStatus.cycleNumber && (
             <div className="ml-auto text-[11px] font-medium tabular-nums" style={{ color: COLORS.textMuted }}>
-              {activeEdgeStatus.stepNumber} / {activeEdgeStatus.totalSteps}
+              CYCLE {activeEdgeStatus.cycleNumber} / {activeEdgeStatus.cycleTotal}
             </div>
           )}
         </div>
@@ -1948,6 +1982,27 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
               }}
             >
               {activeEdgeStatus.phase} · {activeEdgeStatus.route}
+            </div>
+          )}
+          {activeEdgeStatus.hopCount !== undefined && activeEdgeStatus.hopCount > 1 && (
+            <div className="mt-2 flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                {Array.from({ length: activeEdgeStatus.hopCount }, (_, hop) => (
+                  <span
+                    key={hop}
+                    className="h-1.5 rounded-full transition-all"
+                    style={{
+                      width: hop === activeEdgeStatus.hopIndex ? 16 : 8,
+                      background: hop <= (activeEdgeStatus.hopIndex ?? -1)
+                        ? withAlpha(activeStepTheme.accent, hop === activeEdgeStatus.hopIndex ? 0.95 : 0.5)
+                        : withAlpha('#94a3b8', 0.22),
+                    }}
+                  />
+                ))}
+              </div>
+              <span className="text-[10px] tabular-nums" style={{ color: COLORS.textMuted }}>
+                hop {(activeEdgeStatus.hopIndex ?? 0) + 1} / {activeEdgeStatus.hopCount}
+              </span>
             </div>
           )}
           {activeEdgeStatus.detail && (
@@ -1969,9 +2024,14 @@ export function AgentCanvasNew({ data }: AgentCanvasNewProps) {
             VISUAL SYSTEM
           </div>
           <div className="space-y-1">
-            <div>Only the current step and its nearby transition are visible.</div>
-            <div>Previous nodes fade out while the next call fades in.</div>
+            <div>A cycle plays its hops in order: model request, dispatch, tool return, feed back.</div>
+            <div>Previous nodes fade out while the next cycle fades in.</div>
             <div>The camera follows the active edge start so playback stays centered.</div>
+            {systemEventCountRef.current > 0 && (
+              <div style={{ color: COLORS.textMuted }}>
+                {systemEventCountRef.current} environment events folded out of the timeline.
+              </div>
+            )}
           </div>
         </div>
       </div>
