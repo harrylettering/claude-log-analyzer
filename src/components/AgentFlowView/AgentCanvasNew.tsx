@@ -909,7 +909,10 @@ function drawNode(
   const label = getDisplayLabel(node)
   const hasSummary = node.entityType === 'tool' && Boolean(actionSummary)
   const summaryText = hasSummary ? actionSummary!.trim() : ''
-  const titleY = hasSummary ? node.y - 12 : node.y - 8
+  // 只有工具节点的副标题（分类）有信息量；其余节点的副标题曾是内部 entityId
+  // （user=0 / main agent=1 / assistant=2），对读者没有意义，不再画，标题居中。
+  const metaText = node.entityType === 'tool' ? getToolCategory(node.displayName).toUpperCase() : null
+  const titleY = hasSummary ? node.y - 12 : metaText ? node.y - 8 : node.y
   const metaY = hasSummary ? node.y + 4 : node.y + 13
 
   ctx.save()
@@ -985,10 +988,11 @@ function drawNode(
   ctx.textBaseline = 'middle'
   ctx.fillText(label, box.x + 32, titleY)
 
-  ctx.fillStyle = COLORS.textDim
-  ctx.font = '11px ui-monospace, SFMono-Regular, monospace'
-  const metaText = node.entityType === 'tool' ? getToolCategory(node.displayName).toUpperCase() : node.entityId
-  ctx.fillText(metaText, box.x + 32, metaY)
+  if (metaText) {
+    ctx.fillStyle = COLORS.textDim
+    ctx.font = '11px ui-monospace, SFMono-Regular, monospace'
+    ctx.fillText(metaText, box.x + 32, metaY)
+  }
 
   const badgeWidth = 42 + theme.badge.length * 6.2
   ctx.fillStyle = withAlpha(accent, 0.14 + progress * 0.14)
@@ -1479,7 +1483,7 @@ export function AgentCanvasNew({ timeline, initialTime = 0, onTimeCommit }: Agen
       const rawTarget = canvasNodesRef.current.get(edge.target)
       if (!rawSource || !rawTarget) return
       const timing = getEdgeTiming(currentTimeRef.current, edgeTimingRef.current.get(edge.id))
-      const reverseExists = canvasEdgesRef.current.has(`${edge.target}-${edge.source}`)
+      const reverseExists = edgePairsRef.current.has(`${edge.target}->${edge.source}`)
       const inactiveAlpha = reverseExists ? 0.08 : 0.2
       const renderAlpha = sceneState.opacity * (timing.active ? Math.max(0.46, timing.pulseAlpha) : inactiveAlpha)
 
