@@ -48,7 +48,11 @@ function createQueryMatcher(
   const readText = caseSensitive ? getEntrySearchText : getEntrySearchTextLower;
 
   if (searchMode === 'exact') {
-    return (entry) => readText(entry) === needle;
+    // "Exact Match" means the whole term, not the whole entry: comparing the
+    // query against an entry's entire serialized payload could never match.
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const wordBoundary = new RegExp(`(^|[^\\w])${escaped}($|[^\\w])`, caseSensitive ? '' : 'i');
+    return (entry) => wordBoundary.test(getEntrySearchText(entry));
   }
 
   return (entry) => readText(entry).includes(needle);
@@ -70,35 +74,79 @@ function matchesMessageType(entry: LogEntry, types: MessageTypeFilter[]): boolea
   return types.includes(entry.type as MessageTypeFilter);
 }
 
-// Check whether the tool name matches.
-function matchesToolName(entry: LogEntry, toolNames: string[]): boolean {
+/**
+ * Map every tool_use id to its tool name.
+ *
+ * A tool_result block only carries the id of the call it answers, so it can
+ * only be attributed to a tool by looking the id up here. Without this, a
+ * tool-name filter drops every result and shows just half of what it should.
+ */
+function collectToolUseNames(entries: LogEntry[]): Map<string, string> {
+  const names = new Map<string, string>();
+
+  for (const entry of entries) {
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content as any[]) {
+      if (!block || (block.type !== 'tool_use' && !block.tool_use)) continue;
+      const toolUse = block.tool_use || block;
+      const name = toolUse.name || toolUse.tool_name;
+      const id = toolUse.id || toolUse.tool_use_id;
+      if (name && id) names.set(id, name);
+    }
+  }
+
+  return names;
+}
+
+// Check whether the tool name matches, on both the call and its result.
+function matchesToolName(
+  entry: LogEntry,
+  toolNames: string[],
+  toolUseNames: Map<string, string>
+): boolean {
   if (toolNames.length === 0) return true;
 
   const content = entry.message?.content;
   if (!Array.isArray(content)) return false;
 
   return content.some((c: any) => {
+    if (!c) return false;
+
     if (c.type === 'tool_use' || c.tool_use) {
       const toolUse = c.tool_use || c;
       const name = toolUse.name || toolUse.tool_name;
-      return name && toolNames.includes(name);
+      return Boolean(name) && toolNames.includes(name);
     }
+
+    if (c.type === 'tool_result') {
+      const name = toolUseNames.get(c.tool_use_id);
+      return name !== undefined && toolNames.includes(name);
+    }
+
     return false;
   });
 }
 
 // Check whether the entry falls inside the selected time range.
 function matchesTimeRange(entry: LogEntry, timeRange: { startTime?: string; endTime?: string }): boolean {
+  if (!timeRange.startTime && !timeRange.endTime) return true;
+
+  // Session metadata (mode, ai-title, file-history-snapshot, …) carries no
+  // timestamp, and NaN fails every comparison — so an undated entry would slip
+  // through any window, including one it cannot possibly belong to.
   const entryTime = new Date(entry.timestamp).getTime();
+  if (Number.isNaN(entryTime)) return false;
 
   if (timeRange.startTime) {
     const startTime = new Date(timeRange.startTime).getTime();
-    if (entryTime < startTime) return false;
+    if (!Number.isNaN(startTime) && entryTime < startTime) return false;
   }
 
   if (timeRange.endTime) {
     const endTime = new Date(timeRange.endTime).getTime();
-    if (entryTime > endTime) return false;
+    if (!Number.isNaN(endTime) && entryTime > endTime) return false;
   }
 
   return true;
@@ -198,12 +246,17 @@ export function filterEntries(
     filters.caseSensitive
   );
 
+  // Results reference their call by id, so the ids have to be resolved before
+  // the single filtering pass can attribute them to a tool.
+  const toolUseNames =
+    filters.toolNames.length > 0 ? collectToolUseNames(entries) : new Map<string, string>();
+
   for (const entry of entries) {
     // Message-type filter.
     if (!matchesMessageType(entry, filters.messageTypes)) continue;
 
     // Tool-name filter.
-    if (!matchesToolName(entry, filters.toolNames)) continue;
+    if (!matchesToolName(entry, filters.toolNames, toolUseNames)) continue;
 
     // Time-range filter.
     if (!matchesTimeRange(entry, filters.timeRange)) continue;
