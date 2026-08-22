@@ -104,6 +104,18 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
 
   const { cycleTimings, realStartMs } = timeline
 
+  /**
+   * 跳的两端在数据里是内部 entityId（user=0 / main agent=1 / assistant=2，
+   * 工具则是 tool_use_id），直接显示读不懂，换成节点名。
+   */
+  const entityName = useCallback(
+    (entityId: string) => {
+      const node = timeline.nodes.get(entityId)
+      return node ? node.displayName.replace(/^tool:/i, '') : entityId
+    },
+    [timeline]
+  )
+
   const activeCycleNumber = useMemo(() => {
     let active = cycleTimings.length > 0 ? cycleTimings[0].cycleNumber : 0
     for (const timing of cycleTimings) {
@@ -468,7 +480,7 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
                             </span>
                             <span style={{ color: COLORS.text }}>{hop.linkType}</span>
                             <span className="truncate" style={{ color: COLORS.textMuted }}>
-                              {hop.source} → {hop.target}
+                              {entityName(hop.source)} → {entityName(hop.target)}
                             </span>
                           </div>
                         ))}
