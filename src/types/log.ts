@@ -136,6 +136,8 @@ export interface LogEntry extends ActionEnhancedEntry {
   promptId?: string;
   toolUseResult?: ToolUseResult;
   sourceToolAssistantUUID?: string;
+  requestId?: string;
+  effort?: string;
 
   // Derived category assigned during parsing.
   _category?: EntryCategory;
