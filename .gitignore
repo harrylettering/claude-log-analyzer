@@ -145,6 +145,4 @@ vite.config.ts.timestamp-*
 .claude/
 .full-process/
 
-#github
-.github/
 .DS_Store
