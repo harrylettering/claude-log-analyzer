@@ -1232,10 +1232,9 @@ interface AgentCanvasNewProps {
   initialTime?: number
   /** 播放位置变化时上报（暂停/跳转/结束时，不是每帧）。 */
   onTimeCommit?: (time: number) => void
-  toolbarExtra?: React.ReactNode
 }
 
-export function AgentCanvasNew({ timeline, initialTime = 0, onTimeCommit, toolbarExtra }: AgentCanvasNewProps) {
+export function AgentCanvasNew({ timeline, initialTime = 0, onTimeCommit }: AgentCanvasNewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -1797,8 +1796,6 @@ export function AgentCanvasNew({ timeline, initialTime = 0, onTimeCommit, toolba
         >
           Reset View
         </button>
-
-        {toolbarExtra}
 
         <div className="ml-3 flex items-center gap-2">
           {SPEED_OPTIONS.map((option) => (

@@ -91,10 +91,9 @@ interface TraceInspectorProps {
   timeline: FlowTimeline
   currentTime: number
   onSeek: (time: number) => void
-  toolbarExtra?: React.ReactNode
 }
 
-export function TraceInspector({ timeline, currentTime, onSeek, toolbarExtra }: TraceInspectorProps) {
+export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspectorProps) {
   // 三个独立开关：展开对话细节、显示工具调用、按耗时宽度布局
   const [expandTurns, setExpandTurns] = useState(true)
   const [showCalls, setShowCalls] = useState(true)
@@ -232,7 +231,6 @@ export function TraceInspector({ timeline, currentTime, onSeek, toolbarExtra }: 
         className="flex items-center gap-3 border-b px-4"
         style={{ height: 54, background: COLORS.panel, borderColor: COLORS.panelBorder }}
       >
-        {toolbarExtra}
         <div className="ml-2 flex items-center gap-2">
           <ToggleButton
             label="Turns"
