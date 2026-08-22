@@ -82,6 +82,18 @@ export interface FlowCycle {
   startedAt?: string
   endedAt?: string
   isError?: boolean
+  /** 检查器用的原始细节：入参、结果、模型与 token 用量。 */
+  payload?: unknown
+  result?: string
+  model?: string
+  effort?: string
+  requestId?: string
+  usage?: {
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheCreationTokens: number
+  }
 }
 
 /** 没有语义的环境事件（attachment / system），不进时间轴，只做计数与刻度。 */
@@ -180,6 +192,36 @@ function summarizeToolResult(toolName: string | undefined, item: Record<string, 
   return resultText ? `${prefix}: ${resultText}` : prefix
 }
 
+/** 工具结果可能是字符串、内容块数组，或 toolUseResult 结构体。统一成可读文本。 */
+function stringifyResult(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    const text = value
+      .map((block) => (typeof block === 'string' ? block : (block as Record<string, unknown>)?.text))
+      .filter((part): part is string => typeof part === 'string')
+      .join('\n')
+    return text || JSON.stringify(value, null, 2)
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const stdout = typeof record.stdout === 'string' ? record.stdout : undefined
+    const stderr = typeof record.stderr === 'string' ? record.stderr : undefined
+    if (stdout !== undefined || stderr !== undefined) {
+      return [stdout, stderr].filter((part) => part).join('\n') || undefined
+    }
+    return JSON.stringify(value, null, 2)
+  }
+  return String(value)
+}
+
+function extractMessageText(contentType: ContentType, item: Record<string, unknown> | null): string | undefined {
+  if (!item) return undefined
+  if (contentType === ContentType.TEXT) return typeof item.text === 'string' ? item.text : undefined
+  if (contentType === ContentType.THINKING) return typeof item.thinking === 'string' ? item.thinking : undefined
+  return undefined
+}
+
 function summarizeMessageContent(contentType: ContentType, item: Record<string, unknown> | null): string {
   if (!item) return ''
   if (contentType === ContentType.THINKING) return truncateText(item.thinking, 88) || 'Reason about next step'
@@ -211,6 +253,8 @@ export class CanvasBuilder {
   private cycles: FlowCycle[] = []
   private pendingToolCycles: Map<string, FlowCycle> = new Map()
   private systemEvents: SystemEvent[] = []
+  /** 上一条 entry 的时间戳，用来给没有显式结束时间的回合算耗时。 */
+  private previousTimestamp?: string
 
   /**
    * Build canvas graph from log entries
@@ -307,6 +351,7 @@ export class CanvasBuilder {
         }
 
         this.collectCycle(entry, virtualNode, role, contentType, item, toolName)
+        if (entry.timestamp) this.previousTimestamp = entry.timestamp
       }
     }
   }
@@ -549,6 +594,7 @@ export class CanvasBuilder {
         pending.entryUuids.push(uuid)
         pending.endedAt = timestamp
         pending.isError = Boolean(item.is_error)
+        pending.result = stringifyResult(entry.toolUseResult ?? item.content)
         this.pendingToolCycles.delete(toolUseId)
         return
       }
@@ -568,6 +614,7 @@ export class CanvasBuilder {
                 ? 'tool_call'
                 : 'other'
 
+    const usage = entry.message?.usage
     const cycle: FlowCycle = {
       id: uuid,
       kind,
@@ -575,8 +622,23 @@ export class CanvasBuilder {
       toolName: kind === 'tool_call' ? toolName ?? this.toolNames.get((item?.tool_use_id as string) ?? '') : undefined,
       hops: [...virtualNode.callLinks],
       entryUuids: [uuid],
-      startedAt: timestamp,
+      // 工具回合从发起时刻算起，等 tool_result 回来才有结束时间。
+      // 其余回合（模型输出、用户输入）本身只有一个时间点，耗时取「距上一条 entry 多久」
+      // —— 即模型生成这段回复花了多久、用户想了多久，这样三条轨道才都能按耗时排宽度。
+      startedAt: kind === 'tool_call' ? timestamp : this.previousTimestamp ?? timestamp,
       endedAt: kind === 'tool_call' ? undefined : timestamp,
+      payload: contentType === ContentType.TOOL_USE ? item?.input : extractMessageText(contentType, item),
+      model: entry.message?.model,
+      effort: typeof entry.effort === 'string' ? entry.effort : undefined,
+      requestId: entry.requestId,
+      usage: usage
+        ? {
+            inputTokens: usage.input_tokens ?? 0,
+            outputTokens: usage.output_tokens ?? 0,
+            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+            cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+          }
+        : undefined,
     }
     this.cycles.push(cycle)
 
