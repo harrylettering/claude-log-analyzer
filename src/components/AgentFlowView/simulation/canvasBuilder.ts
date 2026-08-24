@@ -8,6 +8,7 @@
 
 import type { LogEntry } from '../../../types/log'
 import { compactPaths } from '../lib/pathText'
+import type { TokenTotals } from '../lib/tokenUsage'
 
 // ─── Entity ID Constants ────────────────────────────────────────────────────────
 
@@ -88,12 +89,7 @@ export interface FlowCycle {
   model?: string
   effort?: string
   requestId?: string
-  usage?: {
-    inputTokens: number
-    outputTokens: number
-    cacheReadTokens: number
-    cacheCreationTokens: number
-  }
+  usage?: TokenTotals
 }
 
 /** 没有语义的环境事件（attachment / system），不进时间轴，只做计数与刻度。 */
@@ -102,6 +98,8 @@ export interface SystemEvent {
   kind: string
   timestamp?: string
   label: string
+  /** 折叠掉的事件仍然被计费，用量要单独带出来，否则成本汇总会少算。 */
+  usage?: TokenTotals
 }
 
 // ─── Helper Functions ───────────────────────────────────────────────────────────
@@ -228,6 +226,24 @@ function summarizeMessageContent(contentType: ContentType, item: Record<string, 
   if (contentType === ContentType.TEXT) return truncateText(item.text, 88) || 'Process message text'
   if (contentType === ContentType.IMAGE) return 'Handle image content'
   return ''
+}
+
+/**
+ * cache_creation_input_tokens 是缓存写入的总量；新版日志还会按 TTL 拆成
+ * 5m / 1h 两项。取拆分之和，缺拆分时回落到汇总字段。
+ */
+function toTokenTotals(usage: NonNullable<LogEntry['message']>['usage']): TokenTotals {
+  const split = usage?.cache_creation
+  const write5m = split?.ephemeral_5m_input_tokens ?? 0
+  const write1h = split?.ephemeral_1h_input_tokens ?? 0
+  const hasSplit = write5m > 0 || write1h > 0
+
+  return {
+    inputTokens: usage?.input_tokens ?? 0,
+    outputTokens: usage?.output_tokens ?? 0,
+    cacheReadTokens: usage?.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: hasSplit ? write5m + write1h : usage?.cache_creation_input_tokens ?? 0,
+  }
 }
 
 const CYCLE_FALLBACK_TITLE: Record<FlowCycleKind, string> = {
@@ -581,6 +597,7 @@ export class CanvasBuilder {
           kind: 'thinking',
           timestamp,
           label: 'Model reasoning (content not recorded)',
+          usage: entry.message?.usage ? toTokenTotals(entry.message.usage) : undefined,
         })
         return
       }
@@ -631,14 +648,7 @@ export class CanvasBuilder {
       model: entry.message?.model,
       effort: typeof entry.effort === 'string' ? entry.effort : undefined,
       requestId: entry.requestId,
-      usage: usage
-        ? {
-            inputTokens: usage.input_tokens ?? 0,
-            outputTokens: usage.output_tokens ?? 0,
-            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-            cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
-          }
-        : undefined,
+      usage: usage ? toTokenTotals(usage) : undefined,
     }
     this.cycles.push(cycle)
 
