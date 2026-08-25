@@ -218,9 +218,12 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
   /**
    * 全会话 token 汇总。
    *
-   * 只有 assistant 回合带 usage —— 每次请求的账单里已经包含它读回的全部历史，
-   * 所以按回合累加不会重复计算。折叠出时间轴的事件（正文被抹掉的推理块）不占
-   * 步骤但一样消耗 token，必须一并计入，否则整场会话会少算两成。
+   * 用量按 API 响应计，去重发生在建图层（见 CanvasBuilder.takeUsageOnce）——
+   * 一次响应会拆成多条 entry 且各自重复带同一份 usage。所以这里拿到的每一份
+   * 都已经是唯一的，直接累加即可。
+   *
+   * 折叠出时间轴的事件也要算：如果一次响应的用量恰好落在被折叠的那条 entry 上
+   * （比如「推理 + 工具调用」里推理排在前面），漏掉它就会少算这一整次响应。
    */
   const sessionTokens = useMemo(() => {
     let totals = EMPTY_TOKEN_TOTALS

@@ -98,7 +98,7 @@ export interface SystemEvent {
   kind: string
   timestamp?: string
   label: string
-  /** 折叠掉的事件仍然被计费，用量要单独带出来，否则成本汇总会少算。 */
+  /** 折叠掉的事件可能恰好持有某次响应的用量，要带出来，否则那一次会漏算。 */
   usage?: TokenTotals
 }
 
@@ -271,6 +271,12 @@ export class CanvasBuilder {
   private systemEvents: SystemEvent[] = []
   /** 上一条 entry 的时间戳，用来给没有显式结束时间的回合算耗时。 */
   private previousTimestamp?: string
+  /**
+   * 已计过用量的 message.id。一次 API 响应会按 content block 拆成多条 entry，
+   * 每条都重复带同一份 usage —— 不按响应去重的话，一次「推理 + 两个工具调用」
+   * 会被记三遍账。
+   */
+  private countedMessageIds: Set<string> = new Set()
 
   /**
    * Build canvas graph from log entries
@@ -564,6 +570,19 @@ export class CanvasBuilder {
    * 把一条 entry 归入一个回合。工具调用的后两跳（工具返回、结果回灌）会追加到
    * 发起它的那个回合上，靠 tool_use_id 配对。
    */
+  /** 每次 API 响应只返回一次用量；同一响应的后续 entry 返回 undefined。 */
+  private takeUsageOnce(entry: LogEntry): TokenTotals | undefined {
+    const usage = entry.message?.usage
+    if (!usage) return undefined
+
+    const messageId = entry.message?.id
+    if (messageId !== undefined) {
+      if (this.countedMessageIds.has(messageId)) return undefined
+      this.countedMessageIds.add(messageId)
+    }
+    return toTokenTotals(usage)
+  }
+
   private collectCycle(
     entry: LogEntry,
     virtualNode: VirtualNode,
@@ -597,7 +616,7 @@ export class CanvasBuilder {
           kind: 'thinking',
           timestamp,
           label: 'Model reasoning (content not recorded)',
-          usage: entry.message?.usage ? toTokenTotals(entry.message.usage) : undefined,
+          usage: this.takeUsageOnce(entry),
         })
         return
       }
@@ -631,7 +650,6 @@ export class CanvasBuilder {
                 ? 'tool_call'
                 : 'other'
 
-    const usage = entry.message?.usage
     const cycle: FlowCycle = {
       id: uuid,
       kind,
@@ -648,7 +666,7 @@ export class CanvasBuilder {
       model: entry.message?.model,
       effort: typeof entry.effort === 'string' ? entry.effort : undefined,
       requestId: entry.requestId,
-      usage: usage ? toTokenTotals(usage) : undefined,
+      usage: this.takeUsageOnce(entry),
     }
     this.cycles.push(cycle)
 
