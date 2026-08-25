@@ -475,6 +475,61 @@ function parseSessionNamesFromHistory() {
 }
 
 // --- Discovery scanner with exclusions and full-path output ---
+const SUBAGENT_DIR_NAME = 'subagents';
+// How often to look for transcripts of agents dispatched mid-session.
+const SUBAGENT_SCAN_INTERVAL_MS = 2000;
+
+/**
+ * Locate the transcripts of the agents a session dispatched.
+ *
+ * They live one level below the session file, at
+ *   <project>/<sessionId>/subagents/agent-<agentId>.jsonl
+ * — a directory the scanner never descended into, so none of this work has
+ * ever been visible. (The old `project === 'subagents'` exclusion guarded
+ * <project-root>/subagents, a path that does not exist.)
+ */
+function getSubagentDir(projectPath, sessionId) {
+    return path.join(projectPath, sessionId, SUBAGENT_DIR_NAME);
+}
+
+function findSubagentLogs(projectPath, sessionId) {
+    const dir = getSubagentDir(projectPath, sessionId);
+    let names;
+    try {
+        names = fs.readdirSync(dir);
+    } catch {
+        // No dispatches, or no permission — either way there is nothing to add.
+        return [];
+    }
+
+    const found = [];
+    for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue;
+        const fullPath = path.join(dir, name);
+        try {
+            const stats = fs.statSync(fullPath);
+            if (!stats.isFile()) continue;
+            found.push({
+                agentId: name.replace(/^agent-/, '').replace(/\.jsonl$/, ''),
+                fileName: name,
+                fullPath,
+                lastUpdated: stats.mtime,
+                size: (stats.size / 1024).toFixed(1) + ' KB',
+            });
+        } catch {
+            // Ignore per-file read errors.
+        }
+    }
+    return found.sort((a, b) => a.lastUpdated - b.lastUpdated);
+}
+
+/** The subagent directory that belongs to a session's log file, if any. */
+function subagentDirForLogFile(filePath) {
+    const sessionId = path.basename(filePath).replace(/\.jsonl$/, '');
+    if (sessionId === path.basename(filePath)) return null; // not a .jsonl
+    return getSubagentDir(path.dirname(filePath), sessionId);
+}
+
 function getRecentSessions(hours = 24) {
     if (!fs.existsSync(CLAUDE_BASE_DIR)) {
         return [];
@@ -492,9 +547,6 @@ function getRecentSessions(hours = 24) {
         const projects = fs.readdirSync(CLAUDE_BASE_DIR);
 
         projects.forEach(project => {
-            // Exclude the subagents folder.
-            if (project === 'subagents') return;
-
             const projectPath = path.join(CLAUDE_BASE_DIR, project);
             if (!fs.statSync(projectPath).isDirectory()) return;
 
@@ -510,14 +562,19 @@ function getRecentSessions(hours = 24) {
                         // Extract sessionId from filename (remove .jsonl extension)
                         const sessionId = file.replace(/\.jsonl$/, '');
                         const renameInfo = sessionNames.get(sessionId);
-                        
+                        const subagents = findSubagentLogs(projectPath, sessionId);
+
                         sessions.push({
                             id: file, // Full filename
                             folderName: project.replace(/^-Users-/, '').replace(/^-Users/, ''), // Strip the -Users prefix
                             fullPath: filePath,
                             lastUpdated: stats.mtime,
                             size: (stats.size / 1024).toFixed(1) + ' KB',
-                            sessionName: renameInfo?.name || null
+                            sessionName: renameInfo?.name || null,
+                            // Reported alongside the session rather than as sessions of
+                            // their own: a transcript with no user in it is not something
+                            // you would open on its own.
+                            subagents
                         });
                     }
                 } catch (e) {
@@ -538,66 +595,152 @@ class LogFileWatcher {
     constructor(ws) {
         this.ws = ws;
         this.watcher = null;
-        this.currentPos = 0;
         this.activeFile = null;
-        // Holds a trailing partial line across reads. A watch event can fire
-        // while a line is only half-written, and the remainder must survive
-        // until the rest of it lands.
-        this.lineBuffer = '';
-        // Reads are async, so serialize them: two overlapping reads would
-        // interleave their chunks into lineBuffer and corrupt every line.
+        /**
+         * Per-file read state, keyed by path.
+         *
+         * A session is no longer a single file: the agents it dispatches write
+         * their own transcripts beside it, and each of those grows on its own
+         * schedule. One shared position would make every file clobber the
+         * others' offsets.
+         *
+         * Each value is { pos, lineBuffer }, where lineBuffer holds a trailing
+         * partial line across reads — a watch event can fire while a line is
+         * only half-written, and the remainder must survive until the rest of
+         * it lands.
+         */
+        this.tracked = new Map();
+        // Reads are async, so serialize them: two overlapping reads of the same
+        // file would interleave their chunks and corrupt every line.
         this.readChain = Promise.resolve();
+        // Polls the subagent directory into existence; see watchPath.
+        this.subagentScanTimer = null;
+        this.subagentDir = null;
     }
 
     watchPath(filePath) {
         if (this.watcher) this.watcher.close();
         this.activeFile = filePath;
-        this.currentPos = 0;
-        this.lineBuffer = '';
+        this.tracked = new Map();
 
         console.log(`[Watcher] Starting live watch: ${filePath}`);
-        
-        // Attach the watcher.
-        this.watcher = chokidar.watch(filePath, { 
+
+        const targets = [filePath];
+
+        const subagentDir = subagentDirForLogFile(filePath);
+        if (subagentDir && fs.existsSync(subagentDir)) {
+            targets.push(subagentDir);
+            console.log(`[Watcher] Also watching subagent transcripts: ${subagentDir}`);
+        }
+
+        this.watcher = chokidar.watch(targets, {
             persistent: true,
-            ignoreInitial: false 
+            ignoreInitial: false
         });
-        
-        // Initial read.
-        this.readNewLines();
-        
-        this.watcher.on('change', () => this.readNewLines());
+
+        // Initial read of the session file. The 'add' event covers it too, but
+        // only if chokidar emits one — this makes the first read unconditional.
+        this.readNewLines(filePath);
+
+        this.watcher.on('add', (p) => this.onFileEvent(p));
+        this.watcher.on('change', (p) => this.onFileEvent(p));
+
+        this.startSubagentScan(subagentDir);
     }
 
-    readNewLines() {
+    /**
+     * Find subagent transcripts that appear after the watch has started.
+     *
+     * The directory does not exist until the session dispatches its first
+     * agent, and chokidar (v4+) will not watch a path that is not there yet —
+     * so the case that matters most, an agent dispatched while you are
+     * watching, is exactly the one an ordinary watch misses. A cheap poll
+     * finds it, and hands the file to chokidar so its appends still arrive
+     * without waiting for the next tick.
+     */
+    startSubagentScan(subagentDir) {
+        this.stopSubagentScan();
+        if (!subagentDir) return;
+        this.subagentDir = subagentDir;
+
+        const scan = () => {
+            let names;
+            try {
+                names = fs.readdirSync(this.subagentDir);
+            } catch {
+                return; // Not dispatched yet.
+            }
+            for (const name of names) {
+                if (!name.endsWith('.jsonl')) continue;
+                const full = path.join(this.subagentDir, name);
+                if (this.tracked.has(full)) continue;
+                console.log(`[Watcher] New subagent transcript: ${name}`);
+                this.readNewLines(full);
+                if (this.watcher) this.watcher.add(full);
+            }
+        };
+
+        scan();
+        this.subagentScanTimer = setInterval(scan, SUBAGENT_SCAN_INTERVAL_MS);
+    }
+
+    stopSubagentScan() {
+        if (this.subagentScanTimer) clearInterval(this.subagentScanTimer);
+        this.subagentScanTimer = null;
+    }
+
+    onFileEvent(filePath) {
+        // The subagent watch is on a directory, so it reports whatever lands
+        // in it. Only transcripts are log data.
+        if (!filePath.endsWith('.jsonl')) return;
+        this.readNewLines(filePath);
+    }
+
+    /** Register a file's read position, creating it on first sight. */
+    trackFile(filePath) {
+        let state = this.tracked.get(filePath);
+        if (!state) {
+            state = { pos: 0, lineBuffer: '' };
+            this.tracked.set(filePath, state);
+        }
+        return state;
+    }
+
+    readNewLines(filePath) {
+        // Registered up front, not inside the queued read: the scan uses
+        // `tracked` to tell new files from known ones, and a read that only
+        // registers when it runs would let the next tick queue it again.
+        this.trackFile(filePath);
         // Queue behind any in-flight read so chunks stay in file order.
-        this.readChain = this.readChain.then(() => this.readNewLinesOnce());
+        this.readChain = this.readChain.then(() => this.readNewLinesOnce(filePath));
         return this.readChain;
     }
 
-    readNewLinesOnce() {
+    readNewLinesOnce(filePath) {
         return new Promise((resolve) => {
-            if (!this.activeFile || !fs.existsSync(this.activeFile)) return resolve();
+            if (!filePath || !fs.existsSync(filePath)) return resolve();
+
+            const state = this.trackFile(filePath);
 
             let stats;
             try {
-                stats = fs.statSync(this.activeFile);
+                stats = fs.statSync(filePath);
             } catch {
                 return resolve();
             }
 
-            if (stats.size < this.currentPos) {
+            if (stats.size < state.pos) {
                 // The file was truncated or replaced; start over.
-                this.currentPos = stats.size;
-                this.lineBuffer = '';
+                state.pos = stats.size;
+                state.lineBuffer = '';
                 return resolve();
             }
 
-            if (stats.size === this.currentPos) return resolve();
+            if (stats.size === state.pos) return resolve();
 
             const readTo = stats.size;
-            const stream = fs.createReadStream(this.activeFile, {
-                start: this.currentPos,
+            const stream = fs.createReadStream(filePath, {
+                start: state.pos,
                 end: readTo,
             });
 
@@ -607,13 +750,17 @@ class LogFileWatcher {
             stream.setEncoding('utf8');
 
             stream.on('data', (chunk) => {
-                this.lineBuffer += chunk;
-                const lines = this.lineBuffer.split('\n');
+                state.lineBuffer += chunk;
+                const lines = state.lineBuffer.split('\n');
                 // The tail is only a complete line if the data ended on a
                 // newline; otherwise it waits here for the rest.
-                this.lineBuffer = lines.pop();
+                state.lineBuffer = lines.pop();
                 lines.forEach((line) => {
                     if (line.trim()) {
+                        // Subagent lines ride the same channel as the session's
+                        // own: every one of them carries `agentId`, so the
+                        // parser attributes them by field rather than by which
+                        // file or in what order they arrived.
                         this.sendToFrontend('log-entry', line);
                     }
                 });
@@ -622,7 +769,7 @@ class LogFileWatcher {
             // Advance only once the bytes are actually buffered, so a failed
             // read does not silently skip them.
             stream.on('end', () => {
-                this.currentPos = readTo;
+                state.pos = readTo;
                 resolve();
             });
 
@@ -640,6 +787,7 @@ class LogFileWatcher {
     }
 
     stop() {
+        this.stopSubagentScan();
         if (this.watcher) this.watcher.close();
     }
 }

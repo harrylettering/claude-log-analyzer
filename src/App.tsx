@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { BarChart2, MessageSquare, Clock, Zap, AlertCircle, Loader2, GitMerge, Sparkles, Activity, Terminal, Search, HardDrive, PlayCircle, Upload, Share2, Calendar, Copy, Check } from 'lucide-react'
+import { BarChart2, MessageSquare, Clock, Zap, AlertCircle, Loader2, GitMerge, Sparkles, Activity, Terminal, Search, HardDrive, PlayCircle, Upload, Share2, Calendar, Copy, Check, Bot } from 'lucide-react'
 import { appendLogContent, createLogSession } from './utils/logParser'
 import type { ParsedLogData } from './types/log'
 import { FileUpload } from './components/FileUpload'
@@ -10,8 +10,9 @@ import { ConversationFlow } from './components/ConversationFlow'
 import { SessionCompare } from './components/SessionCompare'
 import { PromptOptimizer } from './components/PromptOptimizer'
 import { AgentFlowView } from './components/AgentFlowView'
+import { SubagentPanel } from './components/SubagentPanel'
 
-type ViewId = 'overview' | 'tokens' | 'timeline' | 'conversation' | 'compare' | 'prompt-optimizer' | 'agent-flow'
+type ViewId = 'overview' | 'tokens' | 'timeline' | 'conversation' | 'compare' | 'prompt-optimizer' | 'agent-flow' | 'subagents'
 
 /** Discovery entries carry the file name; the session id is that without the extension. */
 const getSessionId = (fileName: string) => fileName.replace(/\.jsonl$/, '')
@@ -19,6 +20,7 @@ const getSessionId = (fileName: string) => fileName.replace(/\.jsonl$/, '')
 const navItems: { id: ViewId; label: string; icon: React.ReactNode }[] = [
   { id: 'agent-flow', label: 'Agent Flow', icon: <Share2 className="w-4 h-4" /> },
   { id: 'overview', label: 'Session Overview', icon: <BarChart2 className="w-4 h-4" /> },
+  { id: 'subagents', label: 'Subagents', icon: <Bot className="w-4 h-4" /> },
   { id: 'prompt-optimizer', label: 'Retrospective', icon: <Sparkles className="w-4 h-4" /> },
   { id: 'compare', label: 'Session Compare', icon: <GitMerge className="w-4 h-4" /> },
   { id: 'tokens', label: 'Token Stats', icon: <Zap className="w-4 h-4" /> },
@@ -349,6 +351,11 @@ export default function App() {
                 <div className="flex gap-3">
                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">JSONL</span>
                    <span className="text-[10px] font-black text-blue-500 uppercase tracking-widest">{session.size}</span>
+                   {session.subagents?.length > 0 && (
+                     <span className="text-[10px] font-black text-violet-400 uppercase tracking-widest">
+                       {session.subagents.length} Agent{session.subagents.length > 1 ? 's' : ''}
+                     </span>
+                   )}
                 </div>
                 <div className="flex items-center gap-2 text-blue-500 font-black text-[10px] uppercase tracking-tighter group-hover:gap-3 transition-all">
                    Watch Session <PlayCircle className="w-4 h-4" />
@@ -468,6 +475,7 @@ export default function App() {
     if (!logData) return null
     switch (currentView) {
       case 'overview': return <SessionOverview data={logData} />
+      case 'subagents': return <SubagentPanel data={logData} />
       case 'prompt-optimizer': return (
         <PromptOptimizer
           data={logData}
@@ -544,7 +552,17 @@ export default function App() {
                     }`}
                   >
                     {item.icon}
-                    {item.label}
+                    <span className="flex-1 text-left">{item.label}</span>
+                    {/* Most sessions dispatch nothing, so the count is what
+                        tells you there is anything to look at — without it the
+                        tab is indistinguishable from an empty one. */}
+                    {item.id === 'subagents' && (logData?.subagents.length ?? 0) > 0 && (
+                      <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-black ${
+                        currentView === item.id ? 'bg-white/20 text-white' : 'bg-violet-500/20 text-violet-300'
+                      }`}>
+                        {logData?.subagents.length}
+                      </span>
+                    )}
                   </button>
                 );
               })}

@@ -7,6 +7,9 @@ import type {
   ContentBlock,
   ToolUseBlock,
   ToolResultBlock,
+  SubagentRun,
+  SubagentStatus,
+  TokenCounters,
 } from '../types/log';
 import type { AgentAction } from '../types/agent';
 import {
@@ -308,6 +311,70 @@ function extractTokenUsage(entry: LogEntry) {
   return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens };
 }
 
+const COUNTER_KEYS = [
+  'inputTokens',
+  'outputTokens',
+  'cacheReadTokens',
+  'cacheWriteTokens',
+  'totalTokens',
+] as const;
+
+export function emptyCounters(): TokenCounters {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+}
+
+/**
+ * Credit one entry's usage to `totals`, counting each API response once.
+ *
+ * A response is logged as one entry per content block, and each of those
+ * entries repeats the whole response's usage — so summing per entry
+ * overcounts. But the repeats are not always equal: an entry written while the
+ * response was still streaming carries a partial count, and a later sibling
+ * carries the final one. A real case from a subagent transcript:
+ *
+ *     msg_011CePJJ… [thinking]  output_tokens=1
+ *     msg_011CePJJ… [tool_use]  output_tokens=411
+ *
+ * So neither "add every entry" nor "keep the first" is right. Each counter is
+ * monotonic across a response's repeats — a partial can never exceed the final
+ * — so the answer is the per-counter maximum, credited as a delta against what
+ * this response has already contributed. That converges to the same total no
+ * matter what order the entries arrive in, which a live watch cannot promise.
+ *
+ * Returns the response's running total when it changed, so the caller can
+ * revise anything derived from it; null when this entry added nothing.
+ */
+function creditUsage(
+  credited: Map<string, TokenCounters>,
+  totals: TokenCounters,
+  messageId: string | undefined,
+  usage: TokenCounters
+): TokenCounters | null {
+  // Nothing to group by, so it can only be taken at face value.
+  if (messageId === undefined) {
+    for (const key of COUNTER_KEYS) totals[key] += usage[key];
+    return usage;
+  }
+
+  const seen = credited.get(messageId);
+  if (!seen) {
+    const fresh = { ...usage };
+    credited.set(messageId, fresh);
+    for (const key of COUNTER_KEYS) totals[key] += usage[key];
+    return fresh;
+  }
+
+  let changed = false;
+  for (const key of COUNTER_KEYS) {
+    if (usage[key] > seen[key]) {
+      totals[key] += usage[key] - seen[key];
+      seen[key] = usage[key];
+      changed = true;
+    }
+  }
+  return changed ? seen : null;
+}
+
 function getTimestamp(entry: LogEntry): number {
   return entry.timestamp ? new Date(entry.timestamp).getTime() : NaN;
 }
@@ -348,18 +415,25 @@ export interface LogSession {
   // Running aggregates, so stats never require a full re-scan.
   userMessages: number;
   assistantMessages: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  totalTokens: number;
+  tokens: TokenCounters;
   // One API response is written as one log entry per content block, each
   // repeating the response's usage — so usage must be counted per message id,
   // not per entry, or a reply with thinking plus two tool calls bills 3x.
-  countedMessageIds: Set<string>;
+  /** What each API response has already contributed; see creditUsage. */
+  countedMessageIds: Map<string, TokenCounters>;
+  /** Where each response's row sits in `tokenUsage`, so it can be revised. */
+  tokenUsageRowIndex: Map<string, number>;
   minTimestamp: number;
   maxTimestamp: number;
   models: Set<string>;
+  // Dispatched agents, keyed by agentId. Populated from two independent
+  // directions — the parent's dispatch record and the agent's own transcript —
+  // which can arrive in either order, so both sides upsert into the same entry.
+  subagents: Map<string, SubagentRun>;
+  // Per-agent bookkeeping, kept out of SubagentRun so the public shape stays
+  // free of parser scratch state.
+  subagentPending: Map<string, Map<string, ToolCall>>;
+  subagentCountedIds: Map<string, Map<string, TokenCounters>>;
 }
 
 export function createLogSession(): LogSession {
@@ -373,16 +447,323 @@ export function createLogSession(): LogSession {
     lineNumber: 0,
     userMessages: 0,
     assistantMessages: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    totalTokens: 0,
-    countedMessageIds: new Set(),
+    tokens: emptyCounters(),
+    countedMessageIds: new Map(),
+    tokenUsageRowIndex: new Map(),
     minTimestamp: Infinity,
     maxTimestamp: -Infinity,
     models: new Set(),
+    subagents: new Map(),
+    subagentPending: new Map(),
+    subagentCountedIds: new Map(),
   };
+}
+
+// ============ Subagents ============
+
+/**
+ * A subagent transcript is streamed on the same channel as the session it
+ * belongs to, so entries have to identify themselves. `agentId` is what does
+ * it — requiring it (rather than trusting `isSidechain` alone) also keeps this
+ * from claiming inline sidechain entries written by older Claude Code builds.
+ */
+function isSubagentEntry(entry: LogEntry): boolean {
+  return entry.isSidechain === true && typeof entry.agentId === 'string' && entry.agentId.length > 0;
+}
+
+function createSubagentRun(agentId: string): SubagentRun {
+  return {
+    agentId,
+    status: 'dispatched',
+    hasTranscript: false,
+    entries: [],
+    toolCalls: [],
+    errorCount: 0,
+    tokens: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+    },
+  };
+}
+
+function getOrCreateRun(session: LogSession, agentId: string): SubagentRun {
+  let run = session.subagents.get(agentId);
+  if (!run) {
+    run = createSubagentRun(agentId);
+    session.subagents.set(agentId, run);
+  }
+  return run;
+}
+
+/**
+ * Record what the parent asked for.
+ *
+ * The dispatch record is written the moment the agent is launched and is never
+ * revisited, so `status: 'async_launched'` on it means "was started", not
+ * "is still running" — everything about how the agent actually fared has to
+ * come from its transcript instead.
+ */
+function ingestSubagentDispatch(session: LogSession, entry: LogEntry): void {
+  const result = entry.toolUseResult;
+  const agentId = typeof result?.agentId === 'string' ? result.agentId : undefined;
+  if (!agentId) return;
+
+  const run = getOrCreateRun(session, agentId);
+  run.dispatchedAt = entry.timestamp;
+  run.dispatchedByUuid = entry.sourceToolAssistantUUID ?? entry.parentUuid ?? undefined;
+  if (typeof result?.description === 'string') run.description = result.description;
+  if (typeof result?.prompt === 'string') run.prompt = result.prompt;
+  if (typeof result?.resolvedModel === 'string') run.model ??= result.resolvedModel;
+  if (typeof result?.agentType === 'string') run.agentType ??= result.agentType;
+  if (typeof result?.outputFile === 'string') run.outputFile = result.outputFile;
+  if (typeof result?.isAsync === 'boolean') run.isAsync = result.isAsync;
+
+  // The tool_use id lets the trace link the parent's Task cycle to this run.
+  const content = entry.message?.content;
+  if (Array.isArray(content)) {
+    for (const block of content as any[]) {
+      if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+        run.dispatchToolUseId = block.tool_use_id;
+        break;
+      }
+    }
+  }
+
+  // A synchronous Task reports its own totals; an async dispatch does not.
+  if (typeof result?.totalDurationMs === 'number') run.durationMs ??= result.totalDurationMs;
+}
+
+function ingestSubagentEntry(session: LogSession, entry: LogEntry): void {
+  const agentId = entry.agentId as string;
+  const run = getOrCreateRun(session, agentId);
+  run.hasTranscript = true;
+  run.entries.push(entry);
+
+  if (entry.attributionAgent) run.agentType = entry.attributionAgent;
+  if (entry.message?.model) run.model = entry.message.model;
+
+  if (entry.timestamp) {
+    if (!run.startedAt || entry.timestamp < run.startedAt) run.startedAt = entry.timestamp;
+    if (!run.endedAt || entry.timestamp > run.endedAt) run.endedAt = entry.timestamp;
+  }
+
+  // The transcript opens with the prompt the agent was handed. Prefer it over
+  // the parent's copy only when the parent never recorded one.
+  if (run.prompt === undefined && entry.type === 'user' && typeof entry.message?.content === 'string') {
+    run.prompt = entry.message.content;
+  }
+
+  let pending = session.subagentPending.get(agentId);
+  if (!pending) {
+    pending = new Map();
+    session.subagentPending.set(agentId, pending);
+  }
+  enrichEntry(entry, run.toolCalls, pending);
+
+  // The agent's last text block is what the parent receives back, so it is
+  // overwritten rather than appended as the transcript grows.
+  if (entry.type === 'assistant' && Array.isArray(entry.message?.content)) {
+    for (const block of entry.message.content as any[]) {
+      if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+        run.resultText = block.text.trim();
+      }
+      if (block?.type === 'tool_result' && (block.is_error === true)) run.errorCount++;
+    }
+  }
+  if (entry.type === 'user' && Array.isArray(entry.message?.content)) {
+    for (const block of entry.message.content as any[]) {
+      if (block?.type === 'tool_result' && block.is_error === true) run.errorCount++;
+    }
+  }
+
+  // Same per-response accounting as the session total — and this is where the
+  // partial-usage case was actually caught, because a Haiku subagent logs its
+  // thinking block before the response has finished streaming.
+  const usage = extractTokenUsage(entry);
+  if (usage) {
+    let counted = session.subagentCountedIds.get(agentId);
+    if (!counted) {
+      counted = new Map();
+      session.subagentCountedIds.set(agentId, counted);
+    }
+    creditUsage(counted, run.tokens, entry.message?.id, usage);
+    if (entry.parsedAction) {
+      entry.parsedAction.usage = { input: usage.inputTokens, output: usage.outputTokens, total: usage.totalTokens };
+    }
+  }
+}
+
+/**
+ * Derive the fields that only make sense once the transcript stops growing.
+ *
+ * Called on every snapshot rather than once at the end, because a live watch
+ * has no end — an agent that is still working must read as running now and as
+ * completed later, off the same accumulated state.
+ */
+function finalizeRun(session: LogSession, run: SubagentRun): SubagentRun {
+  const startMs = run.startedAt ? new Date(run.startedAt).getTime() : NaN;
+  const endMs = run.endedAt ? new Date(run.endedAt).getTime() : NaN;
+  const durationMs = !Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs
+    ? endMs - startMs
+    : run.durationMs;
+
+  const dispatchMs = run.dispatchedAt ? new Date(run.dispatchedAt).getTime() : NaN;
+  const launchLatencyMs = !Number.isNaN(dispatchMs) && !Number.isNaN(startMs) && startMs >= dispatchMs
+    ? startMs - dispatchMs
+    : undefined;
+
+  const pendingCount = session.subagentPending.get(run.agentId)?.size ?? 0;
+  let status: SubagentStatus;
+  if (!run.hasTranscript) {
+    status = 'dispatched';
+  } else if (run.errorCount > 0) {
+    status = 'error';
+  } else if (pendingCount > 0) {
+    // The transcript ends on a tool call nothing answered — either the agent is
+    // still working, or it stopped mid-call.
+    status = 'running';
+  } else if (run.resultText) {
+    status = 'completed';
+  } else {
+    status = 'running';
+  }
+
+  return { ...run, durationMs, launchLatencyMs, status };
+}
+
+/**
+ * Turn one raw entry into a rendered action and fold its tool calls into the
+ * given accumulators.
+ *
+ * The accumulators are parameters rather than session fields because subagent
+ * transcripts need exactly this treatment against their own tool lists. Two
+ * copies of this logic would drift; one that is handed its destination cannot.
+ */
+function enrichEntry(entry: LogEntry, resolved: ToolCall[], pending: Map<string, ToolCall>): void {
+  // Assistant message handling.
+  if (entry.type === 'assistant' && entry.message) {
+    const contentArray = Array.isArray(entry.message.content) ? entry.message.content : [];
+    let hasToolUse = false;
+    let assistantText = '';
+
+    contentArray.forEach((item) => {
+      if (item.type === 'thinking') {
+        setParsedActionWithPriority(entry, { type: 'AgentThought', text: (item as any).thinking });
+      } else if (item.type === 'text') {
+        assistantText += (item as any).text + '\n';
+      }
+      const toolUse = extractToolUseFromContent(item);
+      if (toolUse) {
+        hasToolUse = true;
+        const toolCall: ToolCall = { id: toolUse.id, name: toolUse.name, input: toolUse.input, timestamp: entry.timestamp };
+        pending.set(toolCall.id, toolCall);
+        const action = createInitialAgentAction(item as ToolUseBlock);
+        if (action) {
+          setParsedActionWithPriority(entry, action);
+          (toolCall as any).sourceEntry = entry;
+        }
+      }
+    });
+
+    // Pure text assistant replies become AssistantText actions.
+    if (!hasToolUse && assistantText.trim()) {
+      setParsedActionWithPriority(entry, { type: 'AssistantText', content: assistantText.trim() });
+    }
+  }
+
+  // Sub-agent task handling.
+  if (entry.toolUseResult?.content) {
+    entry.toolUseResult.content.forEach((item) => {
+      const action = createInitialAgentAction(item as any);
+      if (action) setParsedActionWithPriority(entry, action);
+    });
+  }
+
+  // User message handling.
+  if (entry.type === 'user' && entry.message) {
+    const contentArray = Array.isArray(entry.message.content) ? entry.message.content : [];
+    let userText = '';
+    let hasImage = false;
+    let hasToolResult = false;
+
+    contentArray.forEach((item) => {
+      // User-uploaded image.
+      if (item.type === 'image' && (item as any).source?.data) {
+        hasImage = true;
+        const imageId = `user_img_${entry.uuid}`;
+        saveImage(imageId, (item as any).source.data).catch(console.error);
+        setParsedActionWithPriority(entry, { type: 'UserImage', imageId, description: 'User upload' });
+      } else if (item.type === 'text') {
+        userText += (item as any).text + '\n';
+      }
+      // Match tool results back to their pending tool calls.
+      const result = processToolResult(item);
+      if (result?.toolUseId) {
+        hasToolResult = true;
+        setParsedActionWithPriority(entry, {
+          type: 'TaskResult',
+          toolUseId: result.toolUseId,
+          content: stringifyResultContent(result.content),
+          isError: result.isError
+        });
+        const toolCall = pending.get(result.toolUseId);
+        if (toolCall) {
+          toolCall.result = result.content;
+          toolCall.isError = result.isError;
+          // Both timestamps are in hand here, and analysisEngine and
+          // patternExtractor already report per-tool durations — without
+          // this they were averaging a field nothing ever set.
+          // Wall clock, so it includes any wait for a permission prompt.
+          const startedAt = new Date(toolCall.timestamp).getTime();
+          const endedAt = new Date(entry.timestamp).getTime();
+          if (!Number.isNaN(startedAt) && !Number.isNaN(endedAt) && endedAt >= startedAt) {
+            toolCall.durationMs = endedAt - startedAt;
+          }
+          resolved.push(toolCall);
+          pending.delete(result.toolUseId);
+          const sourceEntry = (toolCall as any).sourceEntry as LogEntry | undefined;
+          if (sourceEntry?.parsedAction) {
+            updateAgentActionWithResult(sourceEntry.parsedAction, result.content, result.isError, entry.uuid);
+          }
+        } else {
+          // If no matching tool call is found, emit a standalone TaskResult action.
+          setParsedActionWithPriority(entry, {
+            type: 'TaskResult',
+            toolUseId: result.toolUseId,
+            content: stringifyResultContent(result.content),
+            isError: result.isError
+          });
+        }
+      }
+    });
+
+    // Handle toolUseResult objects attached directly to the entry.
+    if (!hasToolResult && entry.toolUseResult) {
+      hasToolResult = true;
+      // Convert the direct toolUseResult into a TaskResult action.
+      const resultContent = entry.toolUseResult.content
+        ? (typeof entry.toolUseResult.content === 'string'
+          ? entry.toolUseResult.content
+          : JSON.stringify(entry.toolUseResult.content, null, 2))
+        : JSON.stringify(entry.toolUseResult, null, 2);
+
+      setParsedActionWithPriority(entry, {
+        type: 'TaskResult',
+        toolUseId: entry.toolUseResult.status === 'error' ? `error-${entry.uuid}` : entry.uuid,
+        content: resultContent,
+        isError: entry.toolUseResult.status === 'error'
+      });
+    }
+
+    // Pure user text without images or tool results becomes a UserMessage action.
+    if (!hasImage && !hasToolResult && userText.trim()) {
+      setParsedActionWithPriority(entry, { type: 'UserMessage', content: userText.trim() });
+    }
+  }
+
 }
 
 function ingestLine(session: LogSession, line: string): void {
@@ -399,6 +780,17 @@ function ingestLine(session: LogSession, line: string): void {
   try {
     const entry = JSON.parse(line) as LogEntry;
     entry._category = categorizeEntry(entry);
+
+    // A subagent transcript is a separate conversation that happens to be
+    // streamed on this channel. Its entries are kept out of the main list:
+    // each transcript has its own root (parentUuid: null), so merging them
+    // would break the uuid tree, and every session-level count would absorb
+    // work the session did not do itself.
+    if (isSubagentEntry(entry)) {
+      ingestSubagentEntry(session, entry);
+      return;
+    }
+
     entries.push(entry);
 
     if (isRealUserInput(entry)) session.userMessages++;
@@ -411,145 +803,31 @@ function ingestLine(session: LogSession, line: string): void {
       if (ts > session.maxTimestamp) session.maxTimestamp = ts;
     }
 
-    // Assistant message handling.
-    if (entry.type === 'assistant' && entry.message) {
-      const contentArray = Array.isArray(entry.message.content) ? entry.message.content : [];
-      let hasToolUse = false;
-      let assistantText = '';
+    enrichEntry(entry, toolCalls, pendingToolCalls);
 
-      contentArray.forEach((item) => {
-        if (item.type === 'thinking') {
-          setParsedActionWithPriority(entry, { type: 'AgentThought', text: (item as any).thinking });
-        } else if (item.type === 'text') {
-          assistantText += (item as any).text + '\n';
-        }
-        const toolUse = extractToolUseFromContent(item);
-        if (toolUse) {
-          hasToolUse = true;
-          const toolCall: ToolCall = { id: toolUse.id, name: toolUse.name, input: toolUse.input, timestamp: entry.timestamp };
-          pendingToolCalls.set(toolCall.id, toolCall);
-          const action = createInitialAgentAction(item as ToolUseBlock);
-          if (action) {
-            setParsedActionWithPriority(entry, action);
-            (toolCall as any).sourceEntry = entry;
-          }
-        }
-      });
-
-      // Pure text assistant replies become AssistantText actions.
-      if (!hasToolUse && assistantText.trim()) {
-        setParsedActionWithPriority(entry, { type: 'AssistantText', content: assistantText.trim() });
-      }
-    }
-
-    // Sub-agent task handling.
-    if (entry.toolUseResult?.content) {
-      entry.toolUseResult.content.forEach((item) => {
-        const action = createInitialAgentAction(item as any);
-        if (action) setParsedActionWithPriority(entry, action);
-      });
-    }
-
-    // User message handling.
-    if (entry.type === 'user' && entry.message) {
-      const contentArray = Array.isArray(entry.message.content) ? entry.message.content : [];
-      let userText = '';
-      let hasImage = false;
-      let hasToolResult = false;
-
-      contentArray.forEach((item) => {
-        // User-uploaded image.
-        if (item.type === 'image' && (item as any).source?.data) {
-          hasImage = true;
-          const imageId = `user_img_${entry.uuid}`;
-          saveImage(imageId, (item as any).source.data).catch(console.error);
-          setParsedActionWithPriority(entry, { type: 'UserImage', imageId, description: 'User upload' });
-        } else if (item.type === 'text') {
-          userText += (item as any).text + '\n';
-        }
-        // Match tool results back to their pending tool calls.
-        const result = processToolResult(item);
-        if (result?.toolUseId) {
-          hasToolResult = true;
-          setParsedActionWithPriority(entry, {
-            type: 'TaskResult',
-            toolUseId: result.toolUseId,
-            content: stringifyResultContent(result.content),
-            isError: result.isError
-          });
-          const toolCall = pendingToolCalls.get(result.toolUseId);
-          if (toolCall) {
-            toolCall.result = result.content;
-            toolCall.isError = result.isError;
-            // Both timestamps are in hand here, and analysisEngine and
-            // patternExtractor already report per-tool durations — without
-            // this they were averaging a field nothing ever set.
-            // Wall clock, so it includes any wait for a permission prompt.
-            const startedAt = new Date(toolCall.timestamp).getTime();
-            const endedAt = new Date(entry.timestamp).getTime();
-            if (!Number.isNaN(startedAt) && !Number.isNaN(endedAt) && endedAt >= startedAt) {
-              toolCall.durationMs = endedAt - startedAt;
-            }
-            toolCalls.push(toolCall);
-            pendingToolCalls.delete(result.toolUseId);
-            const sourceEntry = (toolCall as any).sourceEntry as LogEntry | undefined;
-            if (sourceEntry?.parsedAction) {
-              updateAgentActionWithResult(sourceEntry.parsedAction, result.content, result.isError, entry.uuid);
-            }
-          } else {
-            // If no matching tool call is found, emit a standalone TaskResult action.
-            setParsedActionWithPriority(entry, {
-              type: 'TaskResult',
-              toolUseId: result.toolUseId,
-              content: stringifyResultContent(result.content),
-              isError: result.isError
-            });
-          }
-        }
-      });
-
-      // Handle toolUseResult objects attached directly to the entry.
-      if (!hasToolResult && entry.toolUseResult) {
-        hasToolResult = true;
-        // Convert the direct toolUseResult into a TaskResult action.
-        const resultContent = entry.toolUseResult.content
-          ? (typeof entry.toolUseResult.content === 'string'
-            ? entry.toolUseResult.content
-            : JSON.stringify(entry.toolUseResult.content, null, 2))
-          : JSON.stringify(entry.toolUseResult, null, 2);
-
-        setParsedActionWithPriority(entry, {
-          type: 'TaskResult',
-          toolUseId: entry.toolUseResult.status === 'error' ? `error-${entry.uuid}` : entry.uuid,
-          content: resultContent,
-          isError: entry.toolUseResult.status === 'error'
-        });
-      }
-
-      // Pure user text without images or tool results becomes a UserMessage action.
-      if (!hasImage && !hasToolResult && userText.trim()) {
-        setParsedActionWithPriority(entry, { type: 'UserMessage', content: userText.trim() });
-      }
-    }
+    // The parent side of a Task dispatch: this is the only place the agentId
+    // appears in the session's own log, and it is what ties a run to the entry
+    // that launched it.
+    if (entry.toolUseResult?.agentId) ingestSubagentDispatch(session, entry);
 
     // Token accounting and stats.
     const usage = extractTokenUsage(entry);
     if (usage) {
-      // Entries split from the same response carry identical usage; count the
-      // first and skip the rest. Entries without a message id are counted as
-      // they come, since there is nothing to group them by.
       const messageId = entry.message?.id;
-      const alreadyCounted = messageId !== undefined && session.countedMessageIds.has(messageId);
-      if (messageId !== undefined) session.countedMessageIds.add(messageId);
+      const credited = creditUsage(session.countedMessageIds, session.tokens, messageId, usage);
 
-      if (!alreadyCounted) {
-        tokenUsage.push({ timestamp: entry.timestamp, ...usage });
-        session.inputTokens += usage.inputTokens;
-        session.outputTokens += usage.outputTokens;
-        session.cacheReadTokens += usage.cacheReadTokens;
-        session.cacheWriteTokens += usage.cacheWriteTokens;
-        session.totalTokens += usage.totalTokens;
+      if (credited) {
+        // One row per response, revised in place when a later sibling reports
+        // a larger count — a second row would double the chart's own totals.
+        const rowIndex = messageId === undefined ? undefined : session.tokenUsageRowIndex.get(messageId);
+        if (rowIndex === undefined) {
+          if (messageId !== undefined) session.tokenUsageRowIndex.set(messageId, tokenUsage.length);
+          tokenUsage.push({ timestamp: entry.timestamp, ...credited });
+        } else {
+          Object.assign(tokenUsage[rowIndex], credited);
+        }
       }
+
       // The per-entry display value stays on every split entry — it describes
       // the response that produced this block, and is not summed anywhere.
       if (entry.parsedAction) {
@@ -586,11 +864,14 @@ function buildParseResult(session: LogSession): ParseResult {
   const tokenUsage = session.tokenUsage.slice();
   const turnDurations = session.turnDurations.slice();
 
+  const subagents = [...session.subagents.values()].map((run) => finalizeRun(session, run));
+
   return {
     data: {
       entries,
       stats: buildStats(session, toolCalls.length),
       toolCalls,
+      subagents,
       tokenUsage,
       turnDurations,
     },
@@ -606,11 +887,11 @@ function buildStats(session: LogSession, toolCallCount: number): SessionStats {
     userMessages: session.userMessages,
     assistantMessages: session.assistantMessages,
     toolCalls: toolCallCount,
-    totalTokens: session.totalTokens,
-    inputTokens: session.inputTokens,
-    outputTokens: session.outputTokens,
-    cacheReadTokens: session.cacheReadTokens,
-    cacheWriteTokens: session.cacheWriteTokens,
+    totalTokens: session.tokens.totalTokens,
+    inputTokens: session.tokens.inputTokens,
+    outputTokens: session.tokens.outputTokens,
+    cacheReadTokens: session.tokens.cacheReadTokens,
+    cacheWriteTokens: session.tokens.cacheWriteTokens,
     sessionDuration: hasRange ? session.maxTimestamp - session.minTimestamp : 0,
     modelsUsed: Array.from(session.models),
   };
