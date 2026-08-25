@@ -474,6 +474,62 @@ function parseSessionNamesFromHistory() {
     return sessionNames;
 }
 
+
+/**
+ * How to invoke the Claude CLI for a one-shot analysis.
+ *
+ * This used to pass `--bare`. On CLI 2.1.245 that flag skips enough of the
+ * startup path that credentials never load, so every analysis came back as
+ * "Not logged in · Please run /login" — while `claude -p` on the same machine
+ * answered fine. `--safe-mode` is what `--bare` was reaching for (start
+ * without customizations, so a user's hooks and plugins do not run as a side
+ * effect of reading a log) and it keeps authentication.
+ */
+const CLAUDE_CLI_FLAGS = '--safe-mode';
+
+/**
+ * Decide whether the CLI actually produced an analysis.
+ *
+ * It exits 0 when it refuses to run: "Not logged in · Please run /login" is
+ * printed on stdout and the process reports success. Checking only the exit
+ * code meant that sentence was rendered to the user as the analysis — a
+ * failure presented as a finished report, which is worse than an error,
+ * because there is nothing to tell you it went wrong.
+ *
+ * Returns an error message, or null when the output looks like a real report.
+ */
+function describeAnalysisFailure(code, output) {
+    const text = (output || '').trim();
+
+    if (!text) {
+        return code === 0
+            ? 'The Claude CLI produced no output. Check that `claude -p` works in your terminal.'
+            : `Analysis process exited unexpectedly (code: ${code}). Please check whether the local Claude CLI is available.`;
+    }
+
+    if (/not logged in|please run \/login/i.test(text)) {
+        return 'The Claude CLI is not authenticated. Run `claude` in a terminal and complete /login, then try again.';
+    }
+    if (/invalid api key|authentication_error|401/i.test(text)) {
+        return `The Claude CLI rejected the request: ${text.split('\n')[0]}`;
+    }
+    if (/credit balance|rate limit|quota/i.test(text)) {
+        return `The Claude CLI could not run the analysis: ${text.split('\n')[0]}`;
+    }
+
+    // A report is long and multi-line. A single short line that came back in
+    // well under the time an analysis takes is a status message, not a result.
+    if (code === 0 && !text.includes('\n') && text.length < 120) {
+        return `The Claude CLI returned a status message instead of an analysis: ${text}`;
+    }
+
+    if (code !== 0) {
+        return `Analysis process exited unexpectedly (code: ${code}). Output so far: ${text.slice(0, 200)}`;
+    }
+
+    return null;
+}
+
 // --- Discovery scanner with exclusions and full-path output ---
 const SUBAGENT_DIR_NAME = 'subagents';
 // How often to look for transcripts of agents dispatched mid-session.
@@ -858,7 +914,7 @@ wss.on('connection', (ws) => {
                         : CLI_ANALYSIS_PROMPT;
 
                     // Execute through the shell, matching the existing CLI workflow.
-                    const command = `cat "${tempFilePath}" | claude --bare -p "${finalPrompt.replace(/"/g, '\\"')}"`;
+                    const command = `cat "${tempFilePath}" | claude ${CLAUDE_CLI_FLAGS} -p "${finalPrompt.replace(/"/g, '\\"')}"`;
                     console.log(`[Executing command] ${command.slice(0, 200)}...`);
 
                     const claudeProcess = exec(command, { shell: '/bin/bash' });
@@ -893,8 +949,9 @@ wss.on('connection', (ws) => {
                         // Clean up the temporary file.
                         try { fs.unlinkSync(tempFilePath); } catch (e) {}
 
-                        if (code !== 0 && !fullOutput) {
-                            ws.send(JSON.stringify({ type: 'claude-analysis-error', payload: `Analysis process exited unexpectedly (code: ${code}). Please check whether the local Claude CLI is available.` }));
+                        const failure = describeAnalysisFailure(code, fullOutput);
+                        if (failure) {
+                            ws.send(JSON.stringify({ type: 'claude-analysis-error', payload: failure }));
                         } else {
                             ws.send(JSON.stringify({ type: 'claude-analysis-end', payload: fullOutput }));
                         }
@@ -926,7 +983,7 @@ wss.on('connection', (ws) => {
                     console.log(`[Temp file] Written: ${tempFilePath}`);
 
                     // Execute through the shell.
-                    const command = `cat "${tempFilePath}" | claude --bare -p "${COMPARE_ANALYSIS_PROMPT.replace(/"/g, '\\"')}"`;
+                    const command = `cat "${tempFilePath}" | claude ${CLAUDE_CLI_FLAGS} -p "${COMPARE_ANALYSIS_PROMPT.replace(/"/g, '\\"')}"`;
                     console.log(`[Executing command] ${command.slice(0, 200)}...`);
 
                     const claudeProcess = exec(command, { shell: '/bin/bash' });
@@ -956,8 +1013,9 @@ wss.on('connection', (ws) => {
                         console.log(`[DEBUG] Claude CLI process exited. Exit code: ${code}`);
                         try { fs.unlinkSync(tempFilePath); } catch (e) {}
 
-                        if (code !== 0 && !fullOutput) {
-                            ws.send(JSON.stringify({ type: 'compare-analysis-error', payload: `Analysis process exited unexpectedly (code: ${code})` }));
+                        const failure = describeAnalysisFailure(code, fullOutput);
+                        if (failure) {
+                            ws.send(JSON.stringify({ type: 'compare-analysis-error', payload: failure }));
                         } else {
                             ws.send(JSON.stringify({ type: 'compare-analysis-end', payload: fullOutput }));
                         }
