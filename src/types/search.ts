@@ -20,7 +20,17 @@ export interface TokenRange {
 }
 
 // Message type filter
-export type MessageTypeFilter = 'all' | 'user' | 'assistant' | 'system' | 'tool' | 'file-history-snapshot';
+export type MessageTypeFilter =
+  | 'all'
+  | 'user'
+  | 'assistant'
+  | 'system'
+  | 'tool'
+  | 'attachment'
+  | 'file-history'
+  // Catch-all for entry types no other option claims, so nothing in a log is
+  // reachable only through 'all'.
+  | 'other';
 
 // Advanced search filters
 export interface SearchFilters {

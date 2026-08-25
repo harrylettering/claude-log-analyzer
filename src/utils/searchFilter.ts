@@ -58,18 +58,38 @@ function createQueryMatcher(
   return (entry) => readText(entry).includes(needle);
 }
 
+/**
+ * Entry types that each named filter claims.
+ *
+ * Claude Code writes far more entry types than this filter ever named, so the
+ * "other" option is derived — anything no named option claims falls into it,
+ * and a type introduced by a future Claude Code release lands there too rather
+ * than becoming unreachable.
+ */
+const FILE_HISTORY_TYPES = ['file-history-snapshot', 'file-history-delta'];
+const NAMED_TYPES = ['user', 'assistant', 'system', ...FILE_HISTORY_TYPES, 'attachment'];
+
+function hasToolBlocks(entry: LogEntry): boolean {
+  const content = entry.message?.content;
+  return Array.isArray(content) && content.some((c: any) =>
+    c.type === 'tool_use' || c.type === 'tool_result'
+  );
+}
+
 // Check whether the entry type matches the filter.
 function matchesMessageType(entry: LogEntry, types: MessageTypeFilter[]): boolean {
   if (types.includes('all')) return true;
 
-  if (types.includes('tool')) {
-    // Treat entries with tool usage or tool results as tool messages.
-    const content = entry.message?.content;
-    const hasTool = Array.isArray(content) && content.some((c: any) =>
-      c.type === 'tool_use' || c.type === 'tool_result'
-    );
-    if (hasTool) return true;
-  }
+  // Tool messages cut across user and assistant entries, so this is a content
+  // test rather than a type test.
+  if (types.includes('tool') && hasToolBlocks(entry)) return true;
+
+  if (types.includes('file-history') && FILE_HISTORY_TYPES.includes(entry.type)) return true;
+  if (types.includes('attachment') && entry.type === 'attachment') return true;
+
+  // Everything the named options do not claim — session metadata such as mode,
+  // ai-title, pr-link, and whatever ships next.
+  if (types.includes('other') && !NAMED_TYPES.includes(entry.type)) return true;
 
   return types.includes(entry.type as MessageTypeFilter);
 }
