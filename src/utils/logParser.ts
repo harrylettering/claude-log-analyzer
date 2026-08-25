@@ -297,8 +297,15 @@ function extractTokenUsage(entry: LogEntry) {
   if (!usage) return null;
   const inputTokens = sanitizeTokenValue(usage.input_tokens);
   const outputTokens = sanitizeTokenValue(usage.output_tokens);
-  const totalTokens = sanitizeTokenValue((usage as any).total_tokens ?? (inputTokens + outputTokens));
-  return { inputTokens, outputTokens, totalTokens };
+  // Prompt caching moves nearly all of a session's input through these two
+  // counters — on a long session they outweigh input_tokens by orders of
+  // magnitude, so a total that omits them is not a total.
+  const cacheReadTokens = sanitizeTokenValue(usage.cache_read_input_tokens);
+  const cacheWriteTokens = sanitizeTokenValue(usage.cache_creation_input_tokens);
+  const totalTokens = sanitizeTokenValue(
+    (usage as any).total_tokens ?? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
+  );
+  return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens };
 }
 
 function getTimestamp(entry: LogEntry): number {
@@ -343,7 +350,13 @@ export interface LogSession {
   assistantMessages: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   totalTokens: number;
+  // One API response is written as one log entry per content block, each
+  // repeating the response's usage — so usage must be counted per message id,
+  // not per entry, or a reply with thinking plus two tool calls bills 3x.
+  countedMessageIds: Set<string>;
   minTimestamp: number;
   maxTimestamp: number;
   models: Set<string>;
@@ -362,7 +375,10 @@ export function createLogSession(): LogSession {
     assistantMessages: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     totalTokens: 0,
+    countedMessageIds: new Set(),
     minTimestamp: Infinity,
     maxTimestamp: -Infinity,
     models: new Set(),
@@ -465,6 +481,15 @@ function ingestLine(session: LogSession, line: string): void {
           if (toolCall) {
             toolCall.result = result.content;
             toolCall.isError = result.isError;
+            // Both timestamps are in hand here, and analysisEngine and
+            // patternExtractor already report per-tool durations — without
+            // this they were averaging a field nothing ever set.
+            // Wall clock, so it includes any wait for a permission prompt.
+            const startedAt = new Date(toolCall.timestamp).getTime();
+            const endedAt = new Date(entry.timestamp).getTime();
+            if (!Number.isNaN(startedAt) && !Number.isNaN(endedAt) && endedAt >= startedAt) {
+              toolCall.durationMs = endedAt - startedAt;
+            }
             toolCalls.push(toolCall);
             pendingToolCalls.delete(result.toolUseId);
             const sourceEntry = (toolCall as any).sourceEntry as LogEntry | undefined;
@@ -510,10 +535,23 @@ function ingestLine(session: LogSession, line: string): void {
     // Token accounting and stats.
     const usage = extractTokenUsage(entry);
     if (usage) {
-      tokenUsage.push({ timestamp: entry.timestamp, ...usage });
-      session.inputTokens += usage.inputTokens;
-      session.outputTokens += usage.outputTokens;
-      session.totalTokens += usage.totalTokens;
+      // Entries split from the same response carry identical usage; count the
+      // first and skip the rest. Entries without a message id are counted as
+      // they come, since there is nothing to group them by.
+      const messageId = entry.message?.id;
+      const alreadyCounted = messageId !== undefined && session.countedMessageIds.has(messageId);
+      if (messageId !== undefined) session.countedMessageIds.add(messageId);
+
+      if (!alreadyCounted) {
+        tokenUsage.push({ timestamp: entry.timestamp, ...usage });
+        session.inputTokens += usage.inputTokens;
+        session.outputTokens += usage.outputTokens;
+        session.cacheReadTokens += usage.cacheReadTokens;
+        session.cacheWriteTokens += usage.cacheWriteTokens;
+        session.totalTokens += usage.totalTokens;
+      }
+      // The per-entry display value stays on every split entry — it describes
+      // the response that produced this block, and is not summed anywhere.
       if (entry.parsedAction) {
         entry.parsedAction.usage = { input: usage.inputTokens, output: usage.outputTokens, total: usage.totalTokens };
       }
@@ -571,6 +609,8 @@ function buildStats(session: LogSession, toolCallCount: number): SessionStats {
     totalTokens: session.totalTokens,
     inputTokens: session.inputTokens,
     outputTokens: session.outputTokens,
+    cacheReadTokens: session.cacheReadTokens,
+    cacheWriteTokens: session.cacheWriteTokens,
     sessionDuration: hasRange ? session.maxTimestamp - session.minTimestamp : 0,
     modelsUsed: Array.from(session.models),
   };

@@ -128,6 +128,8 @@ export const DEFAULT_ANALYSIS: AnalysisResult = {
     totalTokens: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     sessionDuration: 0,
     modelsUsed: [],
   },

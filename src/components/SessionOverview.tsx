@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { MessageCircle, Settings, Clock, FileText, Zap } from 'lucide-react';
+import { MessageCircle, Settings, Clock, FileText, Zap, Database } from 'lucide-react';
 import type { ParsedLogData } from '../types/log';
 import { formatDuration, formatTokens } from '../utils/logParser';
 
@@ -56,18 +56,29 @@ export function SessionOverview({ data }: SessionOverviewProps) {
       value: formatTokens(stats.totalTokens),
       icon: <Zap className="w-5 h-5" />,
       color: 'from-yellow-500 to-orange-500',
+      subtitle: 'Input, output and cached tokens combined',
     },
     {
       title: 'Input Tokens',
       value: formatTokens(stats.inputTokens),
       icon: <FileText className="w-5 h-5" />,
       color: 'from-teal-500 to-cyan-500',
+      subtitle: 'Uncached input only — see Cached below',
     },
     {
       title: 'Output Tokens',
       value: formatTokens(stats.outputTokens),
       icon: <FileText className="w-5 h-5" />,
       color: 'from-pink-500 to-rose-500',
+    },
+    {
+      // On a long session prompt caching carries almost all of the input, so
+      // leaving it off the page made Total Tokens look two orders too small.
+      title: 'Cached Tokens',
+      value: formatTokens(stats.cacheReadTokens + stats.cacheWriteTokens),
+      icon: <Database className="w-5 h-5" />,
+      color: 'from-violet-500 to-purple-500',
+      subtitle: `${formatTokens(stats.cacheReadTokens)} read · ${formatTokens(stats.cacheWriteTokens)} written`,
     },
   ], [stats]);
 

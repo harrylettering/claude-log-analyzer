@@ -30,7 +30,9 @@ const MESSAGE_TYPES: { value: MessageTypeFilter; label: string }[] = [
   { value: 'assistant', label: 'Assistant Messages' },
   { value: 'system', label: 'System Messages' },
   { value: 'tool', label: 'Tool Messages' },
-  { value: 'file-history-snapshot', label: 'File Snapshots' },
+  { value: 'attachment', label: 'Attachments' },
+  { value: 'file-history', label: 'File History' },
+  { value: 'other', label: 'Session Metadata' },
 ];
 
 const SEARCH_MODES: { value: SearchMode; label: string }[] = [
