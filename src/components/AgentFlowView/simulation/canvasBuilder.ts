@@ -282,7 +282,11 @@ export class CanvasBuilder {
    * 每条都重复带同一份 usage —— 不按响应去重的话，一次「推理 + 两个工具调用」
    * 会被记三遍账。
    */
-  private countedMessageIds: Set<string> = new Set()
+  /**
+   * 每次响应已经计入的用量，指向挂在回合上的那个对象 —— 后续兄弟条目报出更大的
+   * 值时就地改它，回合显示的数字也跟着变成最终值。
+   */
+  private usageByMessageId: Map<string, TokenTotals> = new Map()
 
   /**
    * Build canvas graph from log entries
@@ -581,12 +585,33 @@ export class CanvasBuilder {
     const usage = entry.message?.usage
     if (!usage) return undefined
 
+    const totals = toTokenTotals(usage)
     const messageId = entry.message?.id
-    if (messageId !== undefined) {
-      if (this.countedMessageIds.has(messageId)) return undefined
-      this.countedMessageIds.add(messageId)
+    // 没有可分组的依据，只能照面值收下。
+    if (messageId === undefined) return totals
+
+    const credited = this.usageByMessageId.get(messageId)
+    if (!credited) {
+      // 这一份会挂到回合上，同一响应的后续 entry 就地修改它而不是再挂一份。
+      const fresh = { ...totals }
+      this.usageByMessageId.set(messageId, fresh)
+      return fresh
     }
-    return toTokenTotals(usage)
+
+    // 同一响应拆成多条 entry，各自重复带同一份 usage —— 但重复的不总是相等：
+    // 流式写入时先落盘的那条带的是半截数。真实例子（子 agent 日志）：
+    //
+    //     msg_011CePJJ… [thinking]  output_tokens=1
+    //     msg_011CePJJ… [tool_use]  output_tokens=411
+    //
+    // 每个计数器在一次响应的重复之间单调不减，半截数不可能超过最终值，
+    // 所以取各计数器的最大值。改的是已经挂出去的那份，因此回合上显示的
+    // 也会从半截数变成最终值，而汇总仍然只算一次。
+    credited.inputTokens = Math.max(credited.inputTokens, totals.inputTokens)
+    credited.outputTokens = Math.max(credited.outputTokens, totals.outputTokens)
+    credited.cacheReadTokens = Math.max(credited.cacheReadTokens, totals.cacheReadTokens)
+    credited.cacheWriteTokens = Math.max(credited.cacheWriteTokens, totals.cacheWriteTokens)
+    return undefined
   }
 
   private collectCycle(
