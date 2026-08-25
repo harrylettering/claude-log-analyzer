@@ -297,8 +297,15 @@ function extractTokenUsage(entry: LogEntry) {
   if (!usage) return null;
   const inputTokens = sanitizeTokenValue(usage.input_tokens);
   const outputTokens = sanitizeTokenValue(usage.output_tokens);
-  const totalTokens = sanitizeTokenValue((usage as any).total_tokens ?? (inputTokens + outputTokens));
-  return { inputTokens, outputTokens, totalTokens };
+  // Prompt caching moves nearly all of a session's input through these two
+  // counters — on a long session they outweigh input_tokens by orders of
+  // magnitude, so a total that omits them is not a total.
+  const cacheReadTokens = sanitizeTokenValue(usage.cache_read_input_tokens);
+  const cacheWriteTokens = sanitizeTokenValue(usage.cache_creation_input_tokens);
+  const totalTokens = sanitizeTokenValue(
+    (usage as any).total_tokens ?? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
+  );
+  return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens };
 }
 
 function getTimestamp(entry: LogEntry): number {
@@ -343,6 +350,8 @@ export interface LogSession {
   assistantMessages: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   totalTokens: number;
   minTimestamp: number;
   maxTimestamp: number;
@@ -362,6 +371,8 @@ export function createLogSession(): LogSession {
     assistantMessages: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     totalTokens: 0,
     minTimestamp: Infinity,
     maxTimestamp: -Infinity,
@@ -513,6 +524,8 @@ function ingestLine(session: LogSession, line: string): void {
       tokenUsage.push({ timestamp: entry.timestamp, ...usage });
       session.inputTokens += usage.inputTokens;
       session.outputTokens += usage.outputTokens;
+      session.cacheReadTokens += usage.cacheReadTokens;
+      session.cacheWriteTokens += usage.cacheWriteTokens;
       session.totalTokens += usage.totalTokens;
       if (entry.parsedAction) {
         entry.parsedAction.usage = { input: usage.inputTokens, output: usage.outputTokens, total: usage.totalTokens };
@@ -571,6 +584,8 @@ function buildStats(session: LogSession, toolCallCount: number): SessionStats {
     totalTokens: session.totalTokens,
     inputTokens: session.inputTokens,
     outputTokens: session.outputTokens,
+    cacheReadTokens: session.cacheReadTokens,
+    cacheWriteTokens: session.cacheWriteTokens,
     sessionDuration: hasRange ? session.maxTimestamp - session.minTimestamp : 0,
     modelsUsed: Array.from(session.models),
   };

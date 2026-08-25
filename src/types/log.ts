@@ -179,6 +179,8 @@ export interface SessionStats {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   sessionDuration: number;
   modelsUsed: string[];
 }
@@ -191,6 +193,8 @@ export interface ParsedLogData {
     timestamp: string;
     inputTokens: number;
     outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
     totalTokens: number;
   }>;
   turnDurations: Array<{
