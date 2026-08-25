@@ -476,6 +476,15 @@ function ingestLine(session: LogSession, line: string): void {
           if (toolCall) {
             toolCall.result = result.content;
             toolCall.isError = result.isError;
+            // Both timestamps are in hand here, and analysisEngine and
+            // patternExtractor already report per-tool durations — without
+            // this they were averaging a field nothing ever set.
+            // Wall clock, so it includes any wait for a permission prompt.
+            const startedAt = new Date(toolCall.timestamp).getTime();
+            const endedAt = new Date(entry.timestamp).getTime();
+            if (!Number.isNaN(startedAt) && !Number.isNaN(endedAt) && endedAt >= startedAt) {
+              toolCall.durationMs = endedAt - startedAt;
+            }
             toolCalls.push(toolCall);
             pendingToolCalls.delete(result.toolUseId);
             const sourceEntry = (toolCall as any).sourceEntry as LogEntry | undefined;
