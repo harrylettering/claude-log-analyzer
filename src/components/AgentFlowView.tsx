@@ -6,10 +6,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Share2, ListTree } from 'lucide-react'
-import type { ParsedLogData } from '../types/log'
+import type { ParsedLogData, SubagentRun } from '../types/log'
 import { AgentCanvasNew } from './AgentFlowView/AgentCanvasNew'
 import { TraceInspector } from './AgentFlowView/TraceInspector'
 import { buildFlowTimeline, EMPTY_TIMELINE } from './AgentFlowView/simulation/flowTimeline'
+import type { FlowTimeline } from './AgentFlowView/simulation/flowTimeline'
 
 type FlowMode = 'canvas' | 'trace'
 
@@ -49,6 +50,23 @@ export function AgentFlowView({ data }: AgentFlowViewProps) {
     () => (data?.entries?.length ? buildFlowTimeline(data.entries) : EMPTY_TIMELINE),
     [data]
   )
+
+  /**
+   * 每个子 agent 的轨迹，用的是同一个构建器。
+   *
+   * 子 agent 的执行过程和主会话是同一种东西 —— 一样的回合、一样的 hops、一样的耗时口径。
+   * 给它单独造一套更弱的表示，只会让展开后的内容和上面那张表对不上。
+   */
+  const subagentTraces = useMemo(() => {
+    const traces = new Map<string, { run: SubagentRun; timeline: FlowTimeline }>()
+    for (const run of data?.subagents ?? []) {
+      traces.set(run.agentId, {
+        run,
+        timeline: run.entries.length ? buildFlowTimeline(run.entries) : EMPTY_TIMELINE,
+      })
+    }
+    return traces
+  }, [data])
 
   const handleSeek = useCallback((time: number) => setSharedTime(time), [])
 
@@ -120,7 +138,12 @@ export function AgentFlowView({ data }: AgentFlowViewProps) {
 
       <div className="min-h-0 flex-1">
         {mode === 'trace' ? (
-          <TraceInspector timeline={timeline} currentTime={sharedTime} onSeek={handleSeek} />
+          <TraceInspector
+            timeline={timeline}
+            currentTime={sharedTime}
+            onSeek={handleSeek}
+            subagentTraces={subagentTraces}
+          />
         ) : (
           <AgentCanvasNew timeline={timeline} initialTime={sharedTime} onTimeCommit={setSharedTime} />
         )}

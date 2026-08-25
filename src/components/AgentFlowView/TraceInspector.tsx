@@ -7,6 +7,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { CycleTiming, FlowTimeline } from './simulation/flowTimeline'
 import type { FlowCycleKind } from './simulation/canvasBuilder'
+import type { SubagentRun } from '../../types/log'
 import { compactPaths } from './lib/pathText'
 import {
   addTokenTotals,
@@ -89,13 +90,31 @@ function toJsonText(value: unknown) {
   }
 }
 
+export interface SubagentTrace {
+  run: SubagentRun
+  timeline: FlowTimeline
+}
+
 interface TraceInspectorProps {
   timeline: FlowTimeline
   currentTime: number
   onSeek: (time: number) => void
+  /** 每个子 agent 自己的一条轨迹，按 agentId 索引。 */
+  subagentTraces?: Map<string, SubagentTrace>
 }
 
-export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspectorProps) {
+export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }: TraceInspectorProps) {
+  // 展开了执行轨迹的派发回合。子 agent 通常只有一两个，默认收起，
+  // 但一旦展开就该看到全部 —— 派发这一行本身没有信息量，信息全在它下面。
+  const [expandedAgents, setExpandedAgents] = useState<Set<string>>(new Set())
+  const toggleAgent = useCallback((agentId: string) => {
+    setExpandedAgents((prev) => {
+      const next = new Set(prev)
+      if (next.has(agentId)) next.delete(agentId)
+      else next.add(agentId)
+      return next
+    })
+  }, [])
   // 三个独立开关：展开对话细节、显示工具调用、按耗时宽度布局
   const [expandTurns, setExpandTurns] = useState(true)
   const [showCalls, setShowCalls] = useState(true)
@@ -128,6 +147,9 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
   }, [cycleTimings, currentTime])
 
   const selected = cycleTimings.find((timing) => timing.cycleNumber === activeCycleNumber)
+  const selectedAgentTrace = selected?.cycle.subagentId
+    ? subagentTraces?.get(selected.cycle.subagentId)
+    : undefined
 
   /**
    * Turns 收起时只留用户输入（一次输入 = 一次对话）；展开后才有模型思考、
@@ -396,44 +418,78 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
           {filtered.map((timing) => {
             const meta = KIND_META[timing.cycle.kind]
             const isActive = timing.cycleNumber === activeCycleNumber
+            const agentId = timing.cycle.subagentId
+            const trace = agentId ? subagentTraces?.get(agentId) : undefined
+            const isExpanded = Boolean(agentId && expandedAgents.has(agentId))
             return (
-              <button
-                key={timing.cycle.id}
-                onClick={() => onSeek(timing.startTime)}
-                className="flex w-full items-center gap-3 border-b px-4 py-1.5 text-left text-xs transition-colors hover:bg-white/[0.03]"
-                style={{
-                  borderColor: 'rgba(148, 163, 184, 0.07)',
-                  background: isActive ? COLORS.rowActive : 'transparent',
-                }}
-              >
-                <span className="w-10 shrink-0 text-right tabular-nums" style={{ color: COLORS.textMuted }}>
-                  {timing.cycleNumber}
-                </span>
-                <span
-                  className="w-14 shrink-0 rounded px-1.5 py-0.5 text-center text-[9px] font-bold tracking-wider"
-                  style={{ background: `${meta.color}22`, color: meta.color }}
+              <div key={timing.cycle.id}>
+                {/* 展开钮和行是同级的两个按钮：一个 button 不能套另一个 button。 */}
+                <div
+                  className="flex w-full items-stretch border-b transition-colors hover:bg-white/[0.03]"
+                  style={{
+                    borderColor: 'rgba(148, 163, 184, 0.07)',
+                    background: isActive ? COLORS.rowActive : 'transparent',
+                  }}
                 >
-                  {meta.label}
-                </span>
-                <span className="w-24 shrink-0 truncate font-mono" style={{ color: COLORS.text }}>
-                  {timing.cycle.toolName ?? ''}
-                </span>
-                <span className="min-w-0 flex-1 truncate" style={{ color: COLORS.textDim }}>
-                  {truncate(timing.cycle.title, 110)}
-                </span>
-                {timing.cycle.result && (
-                  <span className="hidden min-w-0 flex-1 truncate lg:block" style={{ color: COLORS.textMuted }}>
-                    → {truncate(timing.cycle.result, 90)}
-                  </span>
-                )}
-                <span className="w-16 shrink-0 text-right tabular-nums" style={{ color: timing.cycle.isError ? '#f87171' : COLORS.textMuted }}>
-                  {timing.cycle.isError
-                    ? 'error'
-                    : timing.cycle.kind === 'tool_call'
-                      ? formatDuration(timing.durationMs)
-                      : ''}
-                </span>
-              </button>
+                  {agentId ? (
+                    <button
+                      onClick={() => toggleAgent(agentId)}
+                      aria-expanded={isExpanded}
+                      title={isExpanded ? 'Collapse the agent trace' : 'Expand the agent trace'}
+                      className="flex w-6 shrink-0 items-center justify-center text-[10px] transition-colors hover:text-white"
+                      style={{ color: isExpanded ? '#c4b5fd' : COLORS.textMuted }}
+                    >
+                      {isExpanded ? '▾' : '▸'}
+                    </button>
+                  ) : (
+                    <span className="w-6 shrink-0" aria-hidden />
+                  )}
+                  <button
+                    onClick={() => onSeek(timing.startTime)}
+                    className="flex min-w-0 flex-1 items-center gap-3 py-1.5 pr-4 text-left text-xs"
+                  >
+                    <span className="w-10 shrink-0 text-right tabular-nums" style={{ color: COLORS.textMuted }}>
+                      {timing.cycleNumber}
+                    </span>
+                    <span
+                      className="w-14 shrink-0 rounded px-1.5 py-0.5 text-center text-[9px] font-bold tracking-wider"
+                      style={{ background: `${meta.color}22`, color: meta.color }}
+                    >
+                      {meta.label}
+                    </span>
+                    <span className="w-24 shrink-0 truncate font-mono" style={{ color: COLORS.text }}>
+                      {timing.cycle.toolName ?? ''}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate" style={{ color: COLORS.textDim }}>
+                      {truncate(timing.cycle.title, 110)}
+                    </span>
+                    {agentId && (
+                      <span
+                        className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wider"
+                        style={{ background: 'rgba(167, 139, 250, 0.16)', color: '#c4b5fd' }}
+                      >
+                        {trace?.run.entries.length
+                          ? `AGENT · ${trace.run.entries.length}`
+                          : 'AGENT'}
+                      </span>
+                    )}
+                    {timing.cycle.result && (
+                      <span className="hidden min-w-0 flex-1 truncate lg:block" style={{ color: COLORS.textMuted }}>
+                        → {truncate(timing.cycle.result, 90)}
+                      </span>
+                    )}
+                    <span className="w-16 shrink-0 text-right tabular-nums" style={{ color: timing.cycle.isError ? '#f87171' : COLORS.textMuted }}>
+                      {timing.cycle.isError
+                        ? 'error'
+                        : timing.cycle.kind === 'tool_call'
+                          ? formatDuration(timing.durationMs)
+                          : ''}
+                    </span>
+                  </button>
+                </div>
+
+                {isExpanded && agentId && <SubagentTraceRows agentId={agentId} trace={trace} />}
+              </div>
             )
           })}
           {filtered.length === 0 && (
@@ -490,6 +546,27 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
                     <DetailRow label="Kind" value={selected.cycle.kind} />
                     {selected.cycle.toolName && <DetailRow label="Tool" value={selected.cycle.toolName} />}
                     {selected.cycle.model && <DetailRow label="Model" value={selected.cycle.model} />}
+                    {/* 派发回合本身几乎没有内容 —— 它的结果只是「agent 已启动」。
+                        真正发生了什么在子 agent 那边，这里至少要指出去。 */}
+                    {selectedAgentTrace && (
+                      <>
+                        <DetailRow label="Agent" value={selectedAgentTrace.run.agentType ?? selectedAgentTrace.run.agentId} />
+                        <DetailRow label="Agent status" value={selectedAgentTrace.run.status} />
+                        {selectedAgentTrace.run.model && (
+                          <DetailRow label="Agent model" value={selectedAgentTrace.run.model} />
+                        )}
+                        <DetailRow label="Agent ran" value={formatDuration(selectedAgentTrace.run.durationMs)} />
+                        <DetailRow
+                          label="Agent cost"
+                          value={`${formatTokens(selectedAgentTrace.run.tokens.totalTokens)} · ${
+                            selectedAgentTrace.run.toolCalls.length
+                          } calls`}
+                        />
+                        <div className="pt-1 text-[11px] leading-4" style={{ color: COLORS.textMuted }}>
+                          This cycle only launched the agent. Expand its row in the table to see what it did.
+                        </div>
+                      </>
+                    )}
                     {selected.cycle.effort && <DetailRow label="Effort" value={selected.cycle.effort} />}
                     {selected.cycle.usage && (
                       <>
@@ -555,6 +632,98 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * 派发回合展开后的内容：子 agent 自己那条轨迹。
+ *
+ * 用的是同一套回合模型和同样的列，只是缩进并且不可跳转 —— 画布播的是主会话的
+ * 时间轴，点子 agent 的回合没有可跳的位置。与其给个假的跳转，不如不给。
+ */
+function SubagentTraceRows({ agentId, trace }: { agentId: string; trace?: SubagentTrace }) {
+  const indent = { borderColor: 'rgba(148, 163, 184, 0.07)', background: 'rgba(167, 139, 250, 0.04)' }
+
+  // 「日志没加载」和「什么都没做」在界面上长得一模一样，必须分开说：
+  // 离线上传的会话文件里有派发记录，却永远不会有子 agent 的那份日志。
+  if (!trace || !trace.run.hasTranscript) {
+    return (
+      <div className="border-b px-4 py-3 pl-14 text-[11px] leading-5" style={{ ...indent, color: COLORS.textMuted }}>
+        No transcript loaded for <span className="font-mono" style={{ color: COLORS.textDim }}>{agentId}</span>. The
+        dispatch is recorded here, but the agent writes its own transcript beside the session file — watching the
+        session through the local server picks it up; an uploaded session file alone does not.
+      </div>
+    )
+  }
+
+  const { run, timeline } = trace
+  const timings = timeline.cycleTimings
+
+  return (
+    <div className="border-b" style={indent}>
+      {/* 这条 agent 是什么、跑了多久、花了多少 —— 展开后第一眼该看到的。 */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 pl-14 text-[11px]" style={{ color: COLORS.textMuted }}>
+        <span className="font-semibold" style={{ color: '#c4b5fd' }}>
+          {run.agentType ?? 'agent'}
+        </span>
+        {run.model && <span className="font-mono">{run.model}</span>}
+        <span>{formatDuration(run.durationMs)}</span>
+        <span>{formatTokens(run.tokens.totalTokens)} tokens</span>
+        <span>{run.toolCalls.length} tool calls</span>
+        {run.errorCount > 0 && <span style={{ color: '#f87171' }}>{run.errorCount} errors</span>}
+        <span style={{ color: run.status === 'error' ? '#f87171' : COLORS.textMuted }}>{run.status}</span>
+      </div>
+
+      {timings.length === 0 ? (
+        <div className="px-4 py-2 pl-14 text-[11px]" style={{ color: COLORS.textMuted }}>
+          The transcript holds {run.entries.length} entries but no cycles — nothing the agent did was recorded as
+          a step.
+        </div>
+      ) : (
+        timings.map((timing) => {
+          const meta = KIND_META[timing.cycle.kind]
+          return (
+            <div
+              key={timing.cycle.id}
+              className="flex items-center gap-3 py-1 pl-14 pr-4 text-[11px]"
+              style={{ color: COLORS.textDim }}
+            >
+              <span className="w-6 shrink-0 text-right tabular-nums" style={{ color: COLORS.textMuted }}>
+                {timing.cycleNumber}
+              </span>
+              <span
+                className="w-14 shrink-0 rounded px-1.5 py-0.5 text-center text-[9px] font-bold tracking-wider"
+                style={{ background: `${meta.color}22`, color: meta.color }}
+              >
+                {meta.label}
+              </span>
+              <span className="w-24 shrink-0 truncate font-mono" style={{ color: COLORS.text }}>
+                {timing.cycle.toolName ?? ''}
+              </span>
+              <span className="min-w-0 flex-1 truncate">{truncate(timing.cycle.title, 100)}</span>
+              {timing.cycle.result && (
+                <span className="hidden min-w-0 flex-1 truncate lg:block" style={{ color: COLORS.textMuted }}>
+                  → {truncate(timing.cycle.result, 80)}
+                </span>
+              )}
+              <span
+                className="w-16 shrink-0 text-right tabular-nums"
+                style={{ color: timing.cycle.isError ? '#f87171' : COLORS.textMuted }}
+              >
+                {timing.cycle.isError ? 'error' : formatDuration(timing.durationMs)}
+              </span>
+            </div>
+          )
+        })
+      )}
+
+      {run.resultText && (
+        <div className="px-4 py-2 pl-14 text-[11px] leading-5" style={{ color: COLORS.textMuted }}>
+          <span className="font-semibold" style={{ color: COLORS.textDim }}>Returned </span>
+          <span className="font-mono">{truncate(run.resultText, 240)}</span>
+        </div>
+      )}
     </div>
   )
 }

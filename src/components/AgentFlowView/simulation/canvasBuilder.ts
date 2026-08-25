@@ -89,6 +89,12 @@ export interface FlowCycle {
   model?: string
   effort?: string
   requestId?: string
+  /**
+   * 这个回合派发了子 agent 时，它的 agentId。
+   * 子 agent 的执行过程写在自己的日志里，主日志只留下这一个 id ——
+   * 有它才能把「派发」这个回合和它真正做了什么接起来。
+   */
+  subagentId?: string
   usage?: TokenTotals
 }
 
@@ -631,6 +637,11 @@ export class CanvasBuilder {
         pending.endedAt = timestamp
         pending.isError = Boolean(item.is_error)
         pending.result = stringifyResult(entry.toolUseResult ?? item.content)
+        // 派发子 agent 的工具结果里带着 agentId，这是主日志中唯一一处提到它的地方。
+        const dispatchedAgentId = entry.toolUseResult?.agentId
+        if (typeof dispatchedAgentId === 'string' && dispatchedAgentId) {
+          pending.subagentId = dispatchedAgentId
+        }
         this.pendingToolCycles.delete(toolUseId)
         return
       }
