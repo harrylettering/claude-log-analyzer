@@ -8,6 +8,12 @@ import { useCallback, useMemo, useState } from 'react'
 import type { CycleTiming, FlowTimeline } from './simulation/flowTimeline'
 import type { FlowCycleKind } from './simulation/canvasBuilder'
 import { compactPaths } from './lib/pathText'
+import {
+  addTokenTotals,
+  EMPTY_TOKEN_TOTALS,
+  formatTokens,
+  sumTokens,
+} from './lib/tokenUsage'
 
 type TrackKey = 'input' | 'model' | 'tools'
 type DetailTab = 'summary' | 'payload' | 'result' | 'timing'
@@ -57,10 +63,6 @@ function formatClock(ms: number | undefined) {
   const date = new Date(ms)
   const pad = (value: number, size = 2) => String(value).padStart(size, '0')
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
-}
-
-function formatTokens(value: number) {
-  return value >= 1000 ? `${(value / 1000).toFixed(1)}K` : String(value)
 }
 
 function truncate(value: string, max: number) {
@@ -214,6 +216,27 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
   )
 
   /**
+   * 全会话 token 汇总。
+   *
+   * 用量按 API 响应计，去重发生在建图层（见 CanvasBuilder.takeUsageOnce）——
+   * 一次响应会拆成多条 entry 且各自重复带同一份 usage。所以这里拿到的每一份
+   * 都已经是唯一的，直接累加即可。
+   *
+   * 折叠出时间轴的事件也要算：如果一次响应的用量恰好落在被折叠的那条 entry 上
+   * （比如「推理 + 工具调用」里推理排在前面），漏掉它就会少算这一整次响应。
+   */
+  const sessionTokens = useMemo(() => {
+    let totals = EMPTY_TOKEN_TOTALS
+    for (const timing of cycleTimings) {
+      if (timing.cycle.usage) totals = addTokenTotals(totals, timing.cycle.usage)
+    }
+    for (const event of timeline.systemEvents) {
+      if (event.usage) totals = addTokenTotals(totals, event.usage)
+    }
+    return totals
+  }, [cycleTimings, timeline.systemEvents])
+
+  /**
    * 用中位数而不是总和：耗时是 tool_use 到 tool_result 的墙钟时间，
    * 包含等待授权和用户离开的空闲，求和会被几个小时级的空档带偏。
    */
@@ -270,6 +293,22 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
           <span>median {formatDuration(medianToolMs)}</span>
           {scaleByDuration && (
             <span title="Bar width is log-scaled so slow and fast steps stay comparable">log scale</span>
+          )}
+          {sumTokens(sessionTokens) > 0 && (
+            <span
+              title={
+                `Input ${formatTokens(sessionTokens.inputTokens)} · ` +
+                `output ${formatTokens(sessionTokens.outputTokens)} · ` +
+                `cache read ${formatTokens(sessionTokens.cacheReadTokens)} · ` +
+                `cache written ${formatTokens(sessionTokens.cacheWriteTokens)}`
+              }
+              style={{ color: COLORS.textDim }}
+            >
+              {formatTokens(sumTokens(sessionTokens))} tokens
+            </span>
+          )}
+          {sessionTokens.outputTokens > 0 && (
+            <span title="Tokens the model generated">{formatTokens(sessionTokens.outputTokens)} out</span>
           )}
         </div>
         <input
@@ -463,7 +502,7 @@ export function TraceInspector({ timeline, currentTime, onSeek }: TraceInspector
                         <DetailRow
                           label="Cache"
                           value={`${formatTokens(selected.cycle.usage.cacheReadTokens)} read · ${formatTokens(
-                            selected.cycle.usage.cacheCreationTokens
+                            selected.cycle.usage.cacheWriteTokens
                           )} written`}
                         />
                       </>

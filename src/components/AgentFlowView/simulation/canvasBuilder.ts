@@ -8,6 +8,7 @@
 
 import type { LogEntry } from '../../../types/log'
 import { compactPaths } from '../lib/pathText'
+import type { TokenTotals } from '../lib/tokenUsage'
 
 // ─── Entity ID Constants ────────────────────────────────────────────────────────
 
@@ -88,12 +89,7 @@ export interface FlowCycle {
   model?: string
   effort?: string
   requestId?: string
-  usage?: {
-    inputTokens: number
-    outputTokens: number
-    cacheReadTokens: number
-    cacheCreationTokens: number
-  }
+  usage?: TokenTotals
 }
 
 /** 没有语义的环境事件（attachment / system），不进时间轴，只做计数与刻度。 */
@@ -102,6 +98,8 @@ export interface SystemEvent {
   kind: string
   timestamp?: string
   label: string
+  /** 折叠掉的事件可能恰好持有某次响应的用量，要带出来，否则那一次会漏算。 */
+  usage?: TokenTotals
 }
 
 // ─── Helper Functions ───────────────────────────────────────────────────────────
@@ -230,6 +228,24 @@ function summarizeMessageContent(contentType: ContentType, item: Record<string, 
   return ''
 }
 
+/**
+ * cache_creation_input_tokens 是缓存写入的总量；新版日志还会按 TTL 拆成
+ * 5m / 1h 两项。取拆分之和，缺拆分时回落到汇总字段。
+ */
+function toTokenTotals(usage: NonNullable<LogEntry['message']>['usage']): TokenTotals {
+  const split = usage?.cache_creation
+  const write5m = split?.ephemeral_5m_input_tokens ?? 0
+  const write1h = split?.ephemeral_1h_input_tokens ?? 0
+  const hasSplit = write5m > 0 || write1h > 0
+
+  return {
+    inputTokens: usage?.input_tokens ?? 0,
+    outputTokens: usage?.output_tokens ?? 0,
+    cacheReadTokens: usage?.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: hasSplit ? write5m + write1h : usage?.cache_creation_input_tokens ?? 0,
+  }
+}
+
 const CYCLE_FALLBACK_TITLE: Record<FlowCycleKind, string> = {
   user_input: 'User request',
   thinking: 'Model reasoning',
@@ -255,6 +271,12 @@ export class CanvasBuilder {
   private systemEvents: SystemEvent[] = []
   /** 上一条 entry 的时间戳，用来给没有显式结束时间的回合算耗时。 */
   private previousTimestamp?: string
+  /**
+   * 已计过用量的 message.id。一次 API 响应会按 content block 拆成多条 entry，
+   * 每条都重复带同一份 usage —— 不按响应去重的话，一次「推理 + 两个工具调用」
+   * 会被记三遍账。
+   */
+  private countedMessageIds: Set<string> = new Set()
 
   /**
    * Build canvas graph from log entries
@@ -548,6 +570,19 @@ export class CanvasBuilder {
    * 把一条 entry 归入一个回合。工具调用的后两跳（工具返回、结果回灌）会追加到
    * 发起它的那个回合上，靠 tool_use_id 配对。
    */
+  /** 每次 API 响应只返回一次用量；同一响应的后续 entry 返回 undefined。 */
+  private takeUsageOnce(entry: LogEntry): TokenTotals | undefined {
+    const usage = entry.message?.usage
+    if (!usage) return undefined
+
+    const messageId = entry.message?.id
+    if (messageId !== undefined) {
+      if (this.countedMessageIds.has(messageId)) return undefined
+      this.countedMessageIds.add(messageId)
+    }
+    return toTokenTotals(usage)
+  }
+
   private collectCycle(
     entry: LogEntry,
     virtualNode: VirtualNode,
@@ -581,6 +616,7 @@ export class CanvasBuilder {
           kind: 'thinking',
           timestamp,
           label: 'Model reasoning (content not recorded)',
+          usage: this.takeUsageOnce(entry),
         })
         return
       }
@@ -614,7 +650,6 @@ export class CanvasBuilder {
                 ? 'tool_call'
                 : 'other'
 
-    const usage = entry.message?.usage
     const cycle: FlowCycle = {
       id: uuid,
       kind,
@@ -631,14 +666,7 @@ export class CanvasBuilder {
       model: entry.message?.model,
       effort: typeof entry.effort === 'string' ? entry.effort : undefined,
       requestId: entry.requestId,
-      usage: usage
-        ? {
-            inputTokens: usage.input_tokens ?? 0,
-            outputTokens: usage.output_tokens ?? 0,
-            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-            cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
-          }
-        : undefined,
+      usage: this.takeUsageOnce(entry),
     }
     this.cycles.push(cycle)
 
