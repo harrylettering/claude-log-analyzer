@@ -147,9 +147,46 @@ export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }
   }, [cycleTimings, currentTime])
 
   const selected = cycleTimings.find((timing) => timing.cycleNumber === activeCycleNumber)
-  const selectedAgentTrace = selected?.cycle.subagentId
+
+  /**
+   * 子 agent 里被点开的那个回合。
+   *
+   * 主轨迹的选中态是从播放位置推出来的，子 agent 的回合不在那条时间轴上，
+   * 所以它需要自己的一份选中态；点主轨迹任何一行都会把它清掉，否则右侧面板会
+   * 停在一个和左边高亮行无关的回合上。
+   */
+  const [selectedSub, setSelectedSub] = useState<{ agentId: string; cycleId: string } | null>(null)
+  const subTrace = selectedSub ? subagentTraces?.get(selectedSub.agentId) : undefined
+  const subTiming = selectedSub
+    ? subTrace?.timeline.cycleTimings.find((timing) => timing.cycle.id === selectedSub.cycleId)
+    : undefined
+
+  const detailTiming = subTiming ?? selected
+  const detailWithinRun = subTiming ? subTrace?.run : undefined
+  const detailDispatchedTrace = !subTiming && selected?.cycle.subagentId
     ? subagentTraces?.get(selected.cycle.subagentId)
     : undefined
+
+  const subEntityName = useCallback(
+    (entityId: string) => {
+      const node = subTrace?.timeline.nodes.get(entityId)
+      if (!node) return entityId
+      // 子 agent 的图是用同一个构建器造的，它的编排节点也叫 "main agent" ——
+      // 但在这条轨迹里那个编排者就是子 agent 自己。照搬会让人读成
+      // 「主 agent 发的这次调用」，所以换成这个 agent 的名字。
+      if (node.entityType === 'main_agent') return subTrace?.run.agentType ?? 'subagent'
+      return node.displayName.replace(/^tool:/i, '')
+    },
+    [subTrace]
+  )
+
+  const selectMainCycle = useCallback(
+    (time: number) => {
+      setSelectedSub(null)
+      onSeek(time)
+    },
+    [onSeek]
+  )
 
   /**
    * Turns 收起时只留用户输入（一次输入 = 一次对话）；展开后才有模型思考、
@@ -377,7 +414,7 @@ export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }
                   return (
                     <button
                       key={timing.cycle.id}
-                      onClick={() => onSeek(timing.startTime)}
+                      onClick={() => selectMainCycle(timing.startTime)}
                       onMouseEnter={() => setHoveredCycle(timing.cycleNumber)}
                       title={`Cycle ${timing.cycleNumber} · ${truncate(timing.cycle.title, 60)}`}
                       className="absolute top-0.5 h-3 rounded-sm transition-opacity"
@@ -431,21 +468,31 @@ export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }
                     background: isActive ? COLORS.rowActive : 'transparent',
                   }}
                 >
+                  {/* 一千多行里只有一两行有子 agent，一个灰色小三角根本不会被注意到 ——
+                      所以这里做成有底色有边框的实心控件，收起时尤其要跳出来。 */}
                   {agentId ? (
-                    <button
-                      onClick={() => toggleAgent(agentId)}
-                      aria-expanded={isExpanded}
-                      title={isExpanded ? 'Collapse the agent trace' : 'Expand the agent trace'}
-                      className="flex w-6 shrink-0 items-center justify-center text-[10px] transition-colors hover:text-white"
-                      style={{ color: isExpanded ? '#c4b5fd' : COLORS.textMuted }}
-                    >
-                      {isExpanded ? '▾' : '▸'}
-                    </button>
+                    <span className="flex w-8 shrink-0 items-center justify-center">
+                      <button
+                        onClick={() => toggleAgent(agentId)}
+                        aria-expanded={isExpanded}
+                        aria-label={isExpanded ? 'Collapse the agent trace' : 'Expand the agent trace'}
+                        title={isExpanded ? 'Collapse the agent trace' : 'Expand the agent trace'}
+                        className="flex h-5 w-5 items-center justify-center rounded-md border text-[11px] font-bold leading-none transition-all hover:scale-110"
+                        style={{
+                          borderColor: isExpanded ? '#a78bfa' : 'rgba(167, 139, 250, 0.55)',
+                          background: isExpanded ? '#a78bfa' : 'rgba(167, 139, 250, 0.16)',
+                          color: isExpanded ? '#0b1220' : '#c4b5fd',
+                          boxShadow: isExpanded ? 'none' : '0 0 0 3px rgba(167, 139, 250, 0.12)',
+                        }}
+                      >
+                        {isExpanded ? '\u2212' : '+'}
+                      </button>
+                    </span>
                   ) : (
-                    <span className="w-6 shrink-0" aria-hidden />
+                    <span className="w-8 shrink-0" aria-hidden />
                   )}
                   <button
-                    onClick={() => onSeek(timing.startTime)}
+                    onClick={() => selectMainCycle(timing.startTime)}
                     className="flex min-w-0 flex-1 items-center gap-3 py-1.5 pr-4 text-left text-xs"
                   >
                     <span className="w-10 shrink-0 text-right tabular-nums" style={{ color: COLORS.textMuted }}>
@@ -488,7 +535,14 @@ export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }
                   </button>
                 </div>
 
-                {isExpanded && agentId && <SubagentTraceRows agentId={agentId} trace={trace} />}
+                {isExpanded && agentId && (
+                  <SubagentTraceRows
+                    agentId={agentId}
+                    trace={trace}
+                    selectedCycleId={selectedSub?.agentId === agentId ? selectedSub.cycleId : undefined}
+                    onSelectCycle={(cycleId) => setSelectedSub({ agentId, cycleId })}
+                  />
+                )}
               </div>
             )
           })}
@@ -499,132 +553,18 @@ export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }
           )}
         </div>
 
-        {/* 详情面板 */}
+        {/* 详情面板。主轨迹和子 agent 轨迹走的是同一个组件 —— 点开子 agent 的一行，
+            看到的字段、标签页、hops 都和主 agent 的一模一样。 */}
         <div className="flex w-[380px] shrink-0 flex-col border-l" style={{ borderColor: COLORS.panelBorder }}>
-          {selected ? (
-            <>
-              <div className="border-b px-4 py-3" style={{ borderColor: COLORS.panelBorder }}>
-                <div className="flex items-center gap-2">
-                  <span
-                    className="rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wider"
-                    style={{
-                      background: `${KIND_META[selected.cycle.kind].color}22`,
-                      color: KIND_META[selected.cycle.kind].color,
-                    }}
-                  >
-                    {KIND_META[selected.cycle.kind].label}
-                  </span>
-                  <span className="text-[11px] font-semibold" style={{ color: COLORS.textDim }}>
-                    Cycle {selected.cycleNumber} · {selected.cycle.hops.length} hops
-                  </span>
-                </div>
-                <div className="mt-2 text-sm font-semibold leading-5" style={{ color: COLORS.text }}>
-                  {truncate(selected.cycle.title, 120)}
-                </div>
-              </div>
-
-              <div className="flex gap-1 border-b px-3" style={{ borderColor: COLORS.panelBorder }}>
-                {DETAIL_TABS.map((tab) => (
-                  <button
-                    key={tab.key}
-                    onClick={() => setDetailTab(tab.key)}
-                    className="px-2.5 py-2 text-xs font-medium transition-colors"
-                    style={{
-                      color: tab.key === detailTab ? COLORS.text : COLORS.textMuted,
-                      borderBottom: `2px solid ${tab.key === detailTab ? '#7dd3fc' : 'transparent'}`,
-                    }}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="min-h-0 flex-1 overflow-auto px-4 py-3 text-xs" style={{ color: COLORS.textDim }}>
-                {detailTab === 'summary' && (
-                  <div className="space-y-2">
-                    <DetailRow label="Status" value={selected.cycle.isError ? 'Error' : 'Completed'} />
-                    <DetailRow label="Kind" value={selected.cycle.kind} />
-                    {selected.cycle.toolName && <DetailRow label="Tool" value={selected.cycle.toolName} />}
-                    {selected.cycle.model && <DetailRow label="Model" value={selected.cycle.model} />}
-                    {/* 派发回合本身几乎没有内容 —— 它的结果只是「agent 已启动」。
-                        真正发生了什么在子 agent 那边，这里至少要指出去。 */}
-                    {selectedAgentTrace && (
-                      <>
-                        <DetailRow label="Agent" value={selectedAgentTrace.run.agentType ?? selectedAgentTrace.run.agentId} />
-                        <DetailRow label="Agent status" value={selectedAgentTrace.run.status} />
-                        {selectedAgentTrace.run.model && (
-                          <DetailRow label="Agent model" value={selectedAgentTrace.run.model} />
-                        )}
-                        <DetailRow label="Agent ran" value={formatDuration(selectedAgentTrace.run.durationMs)} />
-                        <DetailRow
-                          label="Agent cost"
-                          value={`${formatTokens(selectedAgentTrace.run.tokens.totalTokens)} · ${
-                            selectedAgentTrace.run.toolCalls.length
-                          } calls`}
-                        />
-                        <div className="pt-1 text-[11px] leading-4" style={{ color: COLORS.textMuted }}>
-                          This cycle only launched the agent. Expand its row in the table to see what it did.
-                        </div>
-                      </>
-                    )}
-                    {selected.cycle.effort && <DetailRow label="Effort" value={selected.cycle.effort} />}
-                    {selected.cycle.usage && (
-                      <>
-                        <DetailRow
-                          label="Tokens"
-                          value={`${formatTokens(selected.cycle.usage.inputTokens)} in · ${formatTokens(
-                            selected.cycle.usage.outputTokens
-                          )} out`}
-                        />
-                        <DetailRow
-                          label="Cache"
-                          value={`${formatTokens(selected.cycle.usage.cacheReadTokens)} read · ${formatTokens(
-                            selected.cycle.usage.cacheWriteTokens
-                          )} written`}
-                        />
-                      </>
-                    )}
-                    <div className="pt-2">
-                      <div className="mb-1.5 text-[10px] font-semibold tracking-wider" style={{ color: COLORS.textMuted }}>
-                        HOPS
-                      </div>
-                      <div className="space-y-1">
-                        {selected.cycle.hops.map((hop, index) => (
-                          <div key={hop.id} className="flex items-baseline gap-2">
-                            <span className="w-4 tabular-nums" style={{ color: COLORS.textMuted }}>
-                              {index + 1}
-                            </span>
-                            <span style={{ color: COLORS.text }}>{hop.linkType}</span>
-                            <span className="truncate" style={{ color: COLORS.textMuted }}>
-                              {entityName(hop.source)} → {entityName(hop.target)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {detailTab === 'payload' && <CodeBlock text={toJsonText(selected.cycle.payload)} empty="No payload recorded." />}
-                {detailTab === 'result' && <CodeBlock text={selected.cycle.result ?? ''} empty="No result recorded." />}
-
-                {detailTab === 'timing' && (
-                  <div className="space-y-2">
-                    <DetailRow label="Started" value={formatClock(selected.startedAtMs)} />
-                    <DetailRow label="Ended" value={formatClock(selected.endedAtMs)} />
-                    <DetailRow label="Duration" value={formatDuration(selected.durationMs)} />
-                    <DetailRow label="Playback" value={`${selected.startTime.toFixed(1)}s`} />
-                    <DetailRow label="Source" value="Session timestamps" />
-                    {selected.cycle.kind === 'tool_call' && (
-                      <div className="pt-1 text-[11px] leading-4" style={{ color: COLORS.textMuted }}>
-                        Wall clock from request to result — includes any wait for permission or user input.
-                      </div>
-                    )}
-                    {selected.cycle.requestId && <DetailRow label="Request" value={selected.cycle.requestId} />}
-                  </div>
-                )}
-              </div>
-            </>
+          {detailTiming ? (
+            <CycleDetail
+              timing={detailTiming}
+              detailTab={detailTab}
+              onSelectTab={setDetailTab}
+              dispatchedTrace={detailDispatchedTrace}
+              withinRun={detailWithinRun}
+              resolveEntity={subTiming ? subEntityName : entityName}
+            />
           ) : (
             <div className="flex flex-1 items-center justify-center text-xs" style={{ color: COLORS.textMuted }}>
               Select a cycle to inspect it.
@@ -637,12 +577,198 @@ export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }
 }
 
 /**
+ * 一个回合的详情。
+ *
+ * 主轨迹和子 agent 的轨迹共用它 —— 两边的回合本来就是同一种东西（同一个构建器
+ * 产出的 FlowCycle），详情如果各写一份，点开子 agent 的行看到的字段迟早会和上面
+ * 那张表对不上。
+ */
+function CycleDetail({
+  timing,
+  detailTab,
+  onSelectTab,
+  dispatchedTrace,
+  withinRun,
+  resolveEntity,
+}: {
+  timing: CycleTiming
+  detailTab: DetailTab
+  onSelectTab: (tab: DetailTab) => void
+  /** 这个回合派发出去的子 agent（如果它是一次派发）。 */
+  dispatchedTrace?: SubagentTrace
+  /** 这个回合本身属于哪个子 agent（如果它来自嵌套轨迹）。 */
+  withinRun?: SubagentRun
+  /**
+   * 把 hop 两端的内部 entityId 换成节点名。
+   * 必须跟着回合所属的那条轨迹走 —— 子 agent 有自己的一套节点，拿主轨迹去查会查不到。
+   */
+  resolveEntity: (entityId: string) => string
+}) {
+  return (
+    <>
+      {withinRun && (
+        <div
+          className="border-b px-4 py-2 text-[11px]"
+          style={{ borderColor: COLORS.panelBorder, background: 'rgba(167, 139, 250, 0.08)' }}
+        >
+          <span className="font-semibold" style={{ color: '#c4b5fd' }}>
+            Inside subagent
+          </span>{' '}
+          <span style={{ color: COLORS.textDim }}>{withinRun.agentType ?? withinRun.agentId}</span>
+        </div>
+      )}
+
+            <div className="border-b px-4 py-3" style={{ borderColor: COLORS.panelBorder }}>
+              <div className="flex items-center gap-2">
+                <span
+                  className="rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wider"
+                  style={{
+                    background: `${KIND_META[timing.cycle.kind].color}22`,
+                    color: KIND_META[timing.cycle.kind].color,
+                  }}
+                >
+                  {KIND_META[timing.cycle.kind].label}
+                </span>
+                <span className="text-[11px] font-semibold" style={{ color: COLORS.textDim }}>
+                  Cycle {timing.cycleNumber} · {timing.cycle.hops.length} hops
+                </span>
+              </div>
+              <div className="mt-2 text-sm font-semibold leading-5" style={{ color: COLORS.text }}>
+                {truncate(timing.cycle.title, 120)}
+              </div>
+            </div>
+
+            <div className="flex gap-1 border-b px-3" style={{ borderColor: COLORS.panelBorder }}>
+              {DETAIL_TABS.map((tab) => (
+                <button
+                  key={tab.key}
+                  onClick={() => onSelectTab(tab.key)}
+                  className="px-2.5 py-2 text-xs font-medium transition-colors"
+                  style={{
+                    color: tab.key === detailTab ? COLORS.text : COLORS.textMuted,
+                    borderBottom: `2px solid ${tab.key === detailTab ? '#7dd3fc' : 'transparent'}`,
+                  }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-auto px-4 py-3 text-xs" style={{ color: COLORS.textDim }}>
+              {detailTab === 'summary' && (
+                <div className="space-y-2">
+                  <DetailRow label="Status" value={timing.cycle.isError ? 'Error' : 'Completed'} />
+                  <DetailRow label="Kind" value={timing.cycle.kind} />
+                  {timing.cycle.toolName && <DetailRow label="Tool" value={timing.cycle.toolName} />}
+                  {timing.cycle.model && <DetailRow label="Model" value={timing.cycle.model} />}
+                  {/* 派发回合本身几乎没有内容 —— 它的结果只是「agent 已启动」。
+                      真正发生了什么在子 agent 那边，这里至少要指出去。 */}
+                  {dispatchedTrace && (
+                    <>
+                      <DetailRow label="Agent" value={dispatchedTrace.run.agentType ?? dispatchedTrace.run.agentId} />
+                      <DetailRow label="Agent status" value={dispatchedTrace.run.status} />
+                      {dispatchedTrace.run.model && (
+                        <DetailRow label="Agent model" value={dispatchedTrace.run.model} />
+                      )}
+                      <DetailRow label="Agent ran" value={formatDuration(dispatchedTrace.run.durationMs)} />
+                      <DetailRow
+                        label="Agent cost"
+                        value={`${formatTokens(dispatchedTrace.run.tokens.totalTokens)} · ${
+                          dispatchedTrace.run.toolCalls.length
+                        } calls`}
+                      />
+                      <div className="pt-1 text-[11px] leading-4" style={{ color: COLORS.textMuted }}>
+                        This cycle only launched the agent. Expand its row in the table to see what it did.
+                      </div>
+                    </>
+                  )}
+                  {timing.cycle.effort && <DetailRow label="Effort" value={timing.cycle.effort} />}
+                  {timing.cycle.usage && (
+                    <>
+                      <DetailRow
+                        label="Tokens"
+                        value={`${formatTokens(timing.cycle.usage.inputTokens)} in · ${formatTokens(
+                          timing.cycle.usage.outputTokens
+                        )} out`}
+                      />
+                      <DetailRow
+                        label="Cache"
+                        value={`${formatTokens(timing.cycle.usage.cacheReadTokens)} read · ${formatTokens(
+                          timing.cycle.usage.cacheWriteTokens
+                        )} written`}
+                      />
+                    </>
+                  )}
+                  <div className="pt-2">
+                    <div className="mb-1.5 text-[10px] font-semibold tracking-wider" style={{ color: COLORS.textMuted }}>
+                      HOPS
+                    </div>
+                    <div className="space-y-1">
+                      {timing.cycle.hops.map((hop, index) => (
+                        <div key={hop.id} className="flex items-baseline gap-2">
+                          <span className="w-4 tabular-nums" style={{ color: COLORS.textMuted }}>
+                            {index + 1}
+                          </span>
+                          <span style={{ color: COLORS.text }}>{hop.linkType}</span>
+                          <span className="truncate" style={{ color: COLORS.textMuted }}>
+                            {resolveEntity(hop.source)} → {resolveEntity(hop.target)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {detailTab === 'payload' && <CodeBlock text={toJsonText(timing.cycle.payload)} empty="No payload recorded." />}
+              {detailTab === 'result' && <CodeBlock text={timing.cycle.result ?? ''} empty="No result recorded." />}
+
+              {detailTab === 'timing' && (
+                <div className="space-y-2">
+                  <DetailRow label="Started" value={formatClock(timing.startedAtMs)} />
+                  <DetailRow label="Ended" value={formatClock(timing.endedAtMs)} />
+                  <DetailRow label="Duration" value={formatDuration(timing.durationMs)} />
+                  {/* 播放位置只对主轨迹成立。子 agent 的回合在画布的时间轴上没有位置，
+                      把它自己那条轨迹的秒数显示成 Playback 会让人以为可以跳过去。 */}
+                  {!withinRun && <DetailRow label="Playback" value={`${timing.startTime.toFixed(1)}s`} />}
+                  <DetailRow
+                    label="Source"
+                    value={withinRun ? 'Subagent transcript timestamps' : 'Session timestamps'}
+                  />
+                  {timing.cycle.kind === 'tool_call' && (
+                    <div className="pt-1 text-[11px] leading-4" style={{ color: COLORS.textMuted }}>
+                      Wall clock from request to result — includes any wait for permission or user input.
+                    </div>
+                  )}
+                  {timing.cycle.requestId && <DetailRow label="Request" value={timing.cycle.requestId} />}
+                </div>
+              )}
+            </div>
+          
+    </>
+  )
+}
+
+/**
  * 派发回合展开后的内容：子 agent 自己那条轨迹。
  *
- * 用的是同一套回合模型和同样的列，只是缩进并且不可跳转 —— 画布播的是主会话的
- * 时间轴，点子 agent 的回合没有可跳的位置。与其给个假的跳转，不如不给。
+ * 用的是同一套回合模型和同样的列，只是缩进。点一行会把右侧详情面板切到那个回合，
+ * 走的是主轨迹用的同一个组件，所以看到的字段完全一致。
+ *
+ * 但它不跳播放位置 —— 画布播的是主会话的时间轴，子 agent 的回合在上面没有位置，
+ * 给一个会落到别处的跳转比不给更糟。
  */
-function SubagentTraceRows({ agentId, trace }: { agentId: string; trace?: SubagentTrace }) {
+function SubagentTraceRows({
+  agentId,
+  trace,
+  selectedCycleId,
+  onSelectCycle,
+}: {
+  agentId: string
+  trace?: SubagentTrace
+  selectedCycleId?: string
+  onSelectCycle: (cycleId: string) => void
+}) {
   const indent = { borderColor: 'rgba(148, 163, 184, 0.07)', background: 'rgba(167, 139, 250, 0.04)' }
 
   // 「日志没加载」和「什么都没做」在界面上长得一模一样，必须分开说：
@@ -684,10 +810,14 @@ function SubagentTraceRows({ agentId, trace }: { agentId: string; trace?: Subage
         timings.map((timing) => {
           const meta = KIND_META[timing.cycle.kind]
           return (
-            <div
+            <button
               key={timing.cycle.id}
-              className="flex items-center gap-3 py-1 pl-14 pr-4 text-[11px]"
-              style={{ color: COLORS.textDim }}
+              onClick={() => onSelectCycle(timing.cycle.id)}
+              className="flex w-full items-center gap-3 py-1 pl-14 pr-4 text-left text-[11px] transition-colors hover:bg-white/[0.04]"
+              style={{
+                color: COLORS.textDim,
+                background: timing.cycle.id === selectedCycleId ? 'rgba(167, 139, 250, 0.16)' : 'transparent',
+              }}
             >
               <span className="w-6 shrink-0 text-right tabular-nums" style={{ color: COLORS.textMuted }}>
                 {timing.cycleNumber}
@@ -713,7 +843,7 @@ function SubagentTraceRows({ agentId, trace }: { agentId: string; trace?: Subage
               >
                 {timing.cycle.isError ? 'error' : formatDuration(timing.durationMs)}
               </span>
-            </div>
+            </button>
           )
         })
       )}
