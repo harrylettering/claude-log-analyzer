@@ -353,6 +353,10 @@ export interface LogSession {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;
+  // One API response is written as one log entry per content block, each
+  // repeating the response's usage — so usage must be counted per message id,
+  // not per entry, or a reply with thinking plus two tool calls bills 3x.
+  countedMessageIds: Set<string>;
   minTimestamp: number;
   maxTimestamp: number;
   models: Set<string>;
@@ -374,6 +378,7 @@ export function createLogSession(): LogSession {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     totalTokens: 0,
+    countedMessageIds: new Set(),
     minTimestamp: Infinity,
     maxTimestamp: -Infinity,
     models: new Set(),
@@ -530,12 +535,23 @@ function ingestLine(session: LogSession, line: string): void {
     // Token accounting and stats.
     const usage = extractTokenUsage(entry);
     if (usage) {
-      tokenUsage.push({ timestamp: entry.timestamp, ...usage });
-      session.inputTokens += usage.inputTokens;
-      session.outputTokens += usage.outputTokens;
-      session.cacheReadTokens += usage.cacheReadTokens;
-      session.cacheWriteTokens += usage.cacheWriteTokens;
-      session.totalTokens += usage.totalTokens;
+      // Entries split from the same response carry identical usage; count the
+      // first and skip the rest. Entries without a message id are counted as
+      // they come, since there is nothing to group them by.
+      const messageId = entry.message?.id;
+      const alreadyCounted = messageId !== undefined && session.countedMessageIds.has(messageId);
+      if (messageId !== undefined) session.countedMessageIds.add(messageId);
+
+      if (!alreadyCounted) {
+        tokenUsage.push({ timestamp: entry.timestamp, ...usage });
+        session.inputTokens += usage.inputTokens;
+        session.outputTokens += usage.outputTokens;
+        session.cacheReadTokens += usage.cacheReadTokens;
+        session.cacheWriteTokens += usage.cacheWriteTokens;
+        session.totalTokens += usage.totalTokens;
+      }
+      // The per-entry display value stays on every split entry — it describes
+      // the response that produced this block, and is not summed anywhere.
       if (entry.parsedAction) {
         entry.parsedAction.usage = { input: usage.inputTokens, output: usage.outputTokens, total: usage.totalTokens };
       }

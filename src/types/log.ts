@@ -87,6 +87,12 @@ export interface ToolUseResult {
 export interface Message {
   role: 'user' | 'assistant';
   content: string | ContentBlock[];
+  /**
+   * Identifies the API response this entry came from. One response is logged
+   * as one entry per content block, all sharing this id — so anything that
+   * sums per-response data (usage above all) must group by it.
+   */
+  id?: string;
   model?: string;
   usage?: UsageInfo;
   stop_reason?: string;
