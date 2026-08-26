@@ -69,19 +69,21 @@ Claude Trace Replay 会把原始会话日志变成可视化回放与调试空间
 - **检查工具调用行为**：按执行顺序查看文件读取、diff、终端命令和工具结果
 - **复盘 token 使用**：识别高消耗轮次和异常峰值，避免问题变成常态
 - **对比 prompt 或模型调整**：看清为什么这次 Claude Code 会话比上次更好或更差
+- **追踪派发出去的工作**：子 agent 做了什么不再停留在「agent 已启动」
 - **向团队分享经验**：把难读的原始 trace 变成大家都能一起讨论的可视化工作台
 
 <a id="feature-highlights"></a>
 
 ## 核心能力
 
-- **Agent Flow Replay**：按时间顺序动态回放主 agent 与各工具之间的调用链
-- **Current Step Context**：聚焦当前步骤，而不只是最后结果
-- **Searchable Timeline**：检索工具调用、思考内容、diff、文件读取、终端命令和执行结果
-- **Token Analytics**：快速识别高消耗轮次和 token 峰值
+- **Agent Flow · Canvas**：按时间顺序动态回放主 agent 与各工具之间的调用链
+- **Agent Flow · Trace**：同一次运行的回合表，按真实耗时铺开，每个回合的入参、结果、hops 和时序都可检视
+- **子 agent 可观测**：用 Task 派发的 agent 会读取它自己的日志，关联回派发它的那个回合，并可在 Trace 里就地展开
+- **实时监听**：本地服务盯着 `~/.claude/projects`，正在进行的会话边写边进来 —— 包括会话中途才派发的 agent 的日志
+- **Searchable Timeline**：检索工具调用、思考内容、diff、文件读取、终端命令和执行结果，可按条目类型、工具、时间范围和 token 区间筛选
+- **Token Analytics**：input、output，以及缓存 token —— 长会话里几乎全部输入都走缓存计数，漏掉它总量会小两个数量级；用量按 API 响应计一次，而不是按日志条数
 - **Session Compare**：对比两次运行中的消息、token、工具和模型差异
-- **AI Retrospective**：生成一轮运行后的优点、问题和改进建议
-- **Prompt Review**：复盘 prompt 质量和协作方式
+- **AI Retrospective**：把压缩后的 trace 交给本地 Claude CLI，生成优点、问题和改进建议
 
 <a id="who-its-for"></a>
 
@@ -116,13 +118,15 @@ Claude Trace Replay 会把原始会话日志变成可视化回放与调试空间
 | --- | --- |
 | ![Session Compare](docs/screenshots/session-compare.png) | ![Agent Flow Assistant Return](docs/screenshots/agent-flow-assistant.png) |
 
+Trace 检查器和 Subagents 视图还没有截图。
+
 ## Quick Start
 
 准备一份你自己的 Claude Code `.jsonl` trace，几分钟内就能在本地跑起来。
 
 ### 环境要求
 
-- Node.js 18+
+- Node.js 20.19+ —— 实时监听用的 `chokidar` 5 要求这个版本。CI 用 Node 22 构建。
 - npm
 
 ### 安装
@@ -140,6 +144,11 @@ npm install
 ```
 
 打开 `http://localhost:3000`。
+
+`start.sh` 会起两个进程：3000 端口的 Vite 开发服务器，和 4000 端口的本地监听服务
+（`server.cjs`）。后者负责扫描 `~/.claude/projects` 里最近的会话、把正在进行的会话
+边写边推给前端，以及在 Retrospective 视图里调用你本地的 `claude` CLI。数据不出本机；
+不启动监听服务也能用，手动上传 `.jsonl` 即可 —— 只是没有自动发现和实时监听。
 
 ### 构建
 
@@ -164,17 +173,18 @@ npm run preview
 
 ## Workspace Views
 
+下面就是左侧导航里的条目，顺序一致。
+
 | 视图 | 你能看到什么 |
 | --- | --- |
+| Agent Flow | 同一条时间轴的两个标签页：**Canvas** 回放 user、主 agent、assistant 与工具之间的交接；**Trace** 按真实耗时列出每个回合，并可逐个检视 |
 | Session Overview | token、消息数、模型、时长和工具的整体统计 |
-| Session Timeline | 按时间顺序查看操作、工具使用、diff 和结果 |
-| Agent Flow | 动态回放 user、主 agent、assistant 与工具之间的交互 |
-| Conversation Flow | 查看消息树结构和对话深度 |
-| Token Usage | 查看 token 峰值、高成本轮次和趋势变化 |
-| AI Analysis | 查看复盘结论和改进建议 |
-| Prompt Optimizer | 查看 prompt 质量与协作建议 |
+| Subagents | 每个被派发的 agent 收到什么任务、做了什么、跑了多久、花了多少、返回了什么 |
+| Retrospective | 由本地 Claude CLI 生成的复盘结论与 prompt 质量建议 |
 | Session Compare | 对比两次运行的差异 |
-| Real-Time Log | 查看原始事件流和 trace 明细 |
+| Token Stats | 查看 token 峰值、高成本轮次和趋势变化 |
+| Timeline | 按时间顺序查看操作、工具使用、diff 和结果 |
+| Conversation Flow | 查看会话原始的 `uuid`/`parentUuid` 结构 |
 
 ## 为什么会做这个项目
 
@@ -207,37 +217,63 @@ Claude Trace Replay 主要围绕 Claude Code `.jsonl` 会话 traces 构建。
 - `parentUuid`
 - `timestamp`
 - `type`
-- `message`
+- `message` —— 其中的 `message.id` 标识这条 entry 来自哪次 API 响应。一次响应会按
+  内容块拆成多条 entry，它们共享同一个 id 并各自重复携带同一份 `usage`，所以任何按
+  响应求和的统计都必须按它分组。
 - `isSidechain`
 - `isMeta`
+- `agentId` / `attributionAgent` —— 出现在子 agent 的日志里
+- `toolUseResult` —— 其中的 `agentId` 是把一次 Task 回合和它启动的那次运行连起来的唯一线索
+
+### 子 agent 日志
+
+用 Task 工具派发的 agent 会写自己的文件，位置在会话文件下一层：
+
+```text
+~/.claude/projects/<project>/<sessionId>/subagents/agent-<agentId>.jsonl
+```
+
+这些条目是一段独立的对话、有自己的根节点，所以它们不进主会话的条目列表，而是按
+`agentId` 归属到对应的 agent。自动发现会找到它们，实时监听会推送它们，Subagents 和
+Trace 视图会读它们。只打开会话文件本身仍能看到「发生过一次派发」—— 只是没有可展开的
+日志，界面会直说这一点。
 
 ## 技术栈
 
-- React 18
-- TypeScript 5
-- Vite 5
+前端：
+
+- React 18、TypeScript 5、Vite 5
 - Tailwind CSS 3
-- Recharts
-- Framer Motion
-- Lucide React
-- html2canvas
-- Zustand
-- XYFlow / React Flow
+- Recharts、XYFlow / React Flow、Framer Motion
+- Lucide React、react-markdown、react-diff-viewer-continued
+- Zustand、html2canvas
+
+本地监听服务（`server.cjs`）：
+
+- Express 5 与 `ws` —— HTTP 做发现，WebSocket 做日志推送
+- chokidar 5 —— 文件监听
+
+Agent Flow 的画布是用 Canvas 2D API 画的，没有用图布局库；React Flow 用在别处。
 
 ## 项目结构
 
 ```text
 claude-trace-replay/
+├── .github/workflows/ci.yml  # 每个 PR 上做类型检查与构建
 ├── docs/
 │   └── screenshots/          # README 媒体资源和产品截图
 ├── src/
-│   ├── components/           # 仪表盘和可视化 UI
+│   ├── components/
+│   │   ├── AgentFlowView/    # Canvas + Trace：建图、回放、检查器
+│   │   └── ...               # Overview、Subagents、Timeline、Compare、Retrospective
 │   ├── hooks/                # 回放和交互 hooks
 │   ├── types/                # 领域类型
 │   ├── utils/                # Trace 解析、分析和辅助工具
-│   ├── App.tsx               # 应用壳层
+│   ├── App.tsx               # 应用壳层与导航
 │   ├── main.tsx              # 入口文件
 │   └── index.css             # 全局样式
+├── server.cjs                # 本地监听服务：发现、实时推送、CLI 分析
+├── start.sh                  # 同时拉起监听服务和开发服务器
 ├── package.json
 └── README.md
 ```
@@ -245,17 +281,31 @@ claude-trace-replay/
 ## 开发
 
 ```bash
-npm run dev       # 启动 Vite 开发服务器
+npm run dev       # 启动 Vite 开发服务器（仅前端）
 npm run build     # 类型检查并构建生产包
 npm run preview   # 本地预览生产构建
-npm run lint      # 运行 ESLint
+node server.cjs   # 单独启动监听服务，端口 4000
 ```
+
+`npm run lint` 虽然定义了但目前跑不起来：仓库装了 ESLint 却没有配置文件，执行会以
+`couldn't find a configuration file` 退出。CI 在每个 PR 上跑 `npm ci && npm run build`
+（完整的类型检查与构建）。补一份 ESLint 配置是很合适的第一个贡献。
+
+### 改解析器时怎么验证
+
+解析器是这个项目里最容易「悄悄算错」的部分 —— 一个错的数字照样能渲染出来。改它的时候，
+请**独立算出期望值**：直接从原始 `.jsonl` 出发，走一条和被测代码不同的推导路径，再逐项比对。
+如果期望值和代码用的是同一套假设，那次比对什么都没验证，只证明了你前后一致地错着 ——
+这在本项目里真实发生过，提交历史里有记录。
 
 ## Roadmap
 
 - 加入匿名 sample traces，方便第一次使用的人直接探索
-- 优化大体量会话下的性能和可视化密度
-- 为复杂 agent 链路增加更多 flow 布局模式
+- 在 Agent Flow 画布上画出子 agent —— 需要给图模型加一条 agent 泳道，所以目前子 agent
+  在 Trace 和 Subagents 视图里可见，画布上还没有
+- 给剩下的无上限列表加虚拟化；Conversation Flow 会把每个节点都渲染出来，大会话下最吃亏
+- 补一份 ESLint 配置让 `npm run lint` 能用，并接进 CI
+- 把失败、重试、重复命令这类信号做成主动呈现的「发现」，而不是靠人眼去看
 - 增加导出报告和复盘结果的预设
 
 ## Contributing
