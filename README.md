@@ -88,27 +88,52 @@ If you use Claude Code seriously, this helps you move from "I captured a trace" 
 - Anyone who wants to learn from real AI coding traces instead of guessing
 ## Screenshots
 
-### Session Intelligence
+### Finding a session
+
+Sessions in `~/.claude/projects` are discovered automatically. A card marked
+`1 AGENT` dispatched a subagent, so there is a transcript to open alongside it.
+
+![Live discovery](docs/screenshots/discovery-sessions.png)
+
+### Agent Flow — Canvas
+
+One cycle at a time: the model requests, the harness dispatches, the tool
+returns, the result feeds back. The panel names the hop you are on and what
+comes next.
+
+| Tool result returning to the agent | A file edit mid-flight |
+| --- | --- |
+| ![Canvas replaying a Read result](docs/screenshots/agent-flow-canvas-read.png) | ![Canvas replaying an Edit result](docs/screenshots/agent-flow-canvas-edit.png) |
+
+### Agent Flow — Trace
+
+The same run as a table. Three tracks across the top place every cycle on real
+elapsed time; `Turns` and `Calls` control how much of the run is folded away.
+Selecting a cycle opens its payload, result, hops and timing.
+
+| Every cycle, scaled by duration | Collapsed to turns and replies |
+| --- | --- |
+| ![Trace listing every cycle](docs/screenshots/trace-cycles.png) | ![Trace collapsed to turns](docs/screenshots/trace-turns.png) |
+
+### Subagents
+
+Work handed to another agent, followed all the way through: what it was asked,
+what it did, what it cost, and what came back. A dispatch row in the Trace
+expands into that agent's own trace, inspected through the same panel.
+
+| The Subagents view | A dispatch expanded inline in the Trace |
+| --- | --- |
+| ![Subagents view](docs/screenshots/subagents.png) | ![A dispatch expanded in the Trace](docs/screenshots/trace-subagent-expanded.png) |
+
+### Session intelligence
 
 | Session Overview | Token Usage |
 | --- | --- |
 | ![Session Overview](docs/screenshots/session-overview.png) | ![Token Usage](docs/screenshots/token-usage.png) |
 
-| Session Timeline | AI Analysis |
+| Timeline, with the retrospective panel | Session Compare |
 | --- | --- |
-| ![Session Timeline](docs/screenshots/session-timeline.png) | ![AI Analysis](docs/screenshots/ai-analysis.png) |
-
-### Flow Visualization
-
-| Conversation Flow | Agent Flow |
-| --- | --- |
-| ![Conversation Flow](docs/screenshots/conversation-flow.png) | ![Agent Flow Bash Return](docs/screenshots/agent-flow-bash.png) |
-
-| Session Compare | Agent Flow Assistant Return |
-| --- | --- |
-| ![Session Compare](docs/screenshots/session-compare.png) | ![Agent Flow Assistant Return](docs/screenshots/agent-flow-assistant.png) |
-
-The Trace inspector and the Subagents view are not pictured yet.
+| ![Session timeline](docs/screenshots/session-timeline.png) | ![Session compare](docs/screenshots/session-compare.png) |
 
 ## Quick Start
 

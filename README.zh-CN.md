@@ -98,27 +98,49 @@ Claude Trace Replay 会把原始会话日志变成可视化回放与调试空间
 
 ## 界面截图
 
-### Session Intelligence
+### 找到一个会话
+
+`~/.claude/projects` 下的会话会被自动发现。标着 `1 AGENT` 的卡片派发过子 agent，
+意味着旁边还有一份可以打开的子 agent 日志。
+
+![自动发现会话](docs/screenshots/discovery-sessions.png)
+
+### Agent Flow · Canvas
+
+一次一个回合：模型发起、harness 派发、工具返回、结果回灌。右侧面板会说明当前处在哪一跳、
+下一步是什么。
+
+| 工具结果正在回到 agent | 一次文件编辑进行中 |
+| --- | --- |
+| ![Canvas 回放 Read 结果](docs/screenshots/agent-flow-canvas-read.png) | ![Canvas 回放 Edit 结果](docs/screenshots/agent-flow-canvas-edit.png) |
+
+### Agent Flow · Trace
+
+同一次运行的表格形态。顶部三条轨道把每个回合按真实耗时铺开；`Turns` 和 `Calls`
+控制折叠掉多少内容。选中一个回合就能看它的入参、结果、hops 和时序。
+
+| 全部回合，按耗时缩放 | 折叠到对话轮次 |
+| --- | --- |
+| ![Trace 列出全部回合](docs/screenshots/trace-cycles.png) | ![Trace 折叠到轮次](docs/screenshots/trace-turns.png) |
+
+### Subagents
+
+派发出去的工作会被完整跟到底：收到什么任务、做了什么、花了多少、返回了什么。
+Trace 里的派发行可以就地展开成那个 agent 自己的轨迹，用同一个面板检视。
+
+| Subagents 视图 | 在 Trace 中就地展开的派发 |
+| --- | --- |
+| ![Subagents 视图](docs/screenshots/subagents.png) | ![在 Trace 中展开的派发](docs/screenshots/trace-subagent-expanded.png) |
+
+### 会话洞察
 
 | Session Overview | Token Usage |
 | --- | --- |
 | ![Session Overview](docs/screenshots/session-overview.png) | ![Token Usage](docs/screenshots/token-usage.png) |
 
-| Session Timeline | AI Analysis |
+| Timeline 与复盘面板 | Session Compare |
 | --- | --- |
-| ![Session Timeline](docs/screenshots/session-timeline.png) | ![AI Analysis](docs/screenshots/ai-analysis.png) |
-
-### Flow Visualization
-
-| Conversation Flow | Agent Flow |
-| --- | --- |
-| ![Conversation Flow](docs/screenshots/conversation-flow.png) | ![Agent Flow Bash Return](docs/screenshots/agent-flow-bash.png) |
-
-| Session Compare | Agent Flow Assistant Return |
-| --- | --- |
-| ![Session Compare](docs/screenshots/session-compare.png) | ![Agent Flow Assistant Return](docs/screenshots/agent-flow-assistant.png) |
-
-Trace 检查器和 Subagents 视图还没有截图。
+| ![会话时间轴](docs/screenshots/session-timeline.png) | ![会话对比](docs/screenshots/session-compare.png) |
 
 ## Quick Start
 
