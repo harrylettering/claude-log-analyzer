@@ -40,7 +40,7 @@
 
 Watch the 90-second product demo:
 
-https://github.com/user-attachments/assets/be7374a6-5f6a-4c87-95f5-defe3974f6ea
+https://github.com/user-attachments/assets/79370643-b03d-4784-adab-25539641bb87
 
 ## Short Pitch
 
@@ -56,6 +56,7 @@ Claude Trace Replay turns raw session logs into a visual replay and debugging wo
 - Understand which tool calls consumed time, tokens, and attention
 - Replay agent-to-tool handoffs instead of reading raw event blocks
 - Compare two sessions to learn what changed between prompts, models, or workflows
+- Follow work the session handed to subagents, instead of losing it at "agent launched"
 - Review prompt quality and collaboration patterns after a run
 
 If you use Claude Code seriously, this helps you move from "I captured a trace" to "I know what happened."
@@ -70,13 +71,14 @@ If you use Claude Code seriously, this helps you move from "I captured a trace" 
 
 ## Feature Highlights
 
-- **Agent Flow Replay**: watch the call graph animate step by step around the main agent
-- **Current Step Context**: inspect what is happening right now, not just the final output
-- **Searchable Timeline**: browse tool calls, thoughts, diffs, file reads, terminal commands, and results
-- **Token Analytics**: identify expensive turns and usage spikes fast
+- **Agent Flow — Canvas**: watch the call graph animate step by step around the main agent
+- **Agent Flow — Trace**: the same run as a table of cycles, laid out on real elapsed time, with every cycle's payload, result, hops and timing inspectable
+- **Subagent observability**: agents dispatched with the Task tool get their own transcripts read, linked back to the cycle that launched them, and expandable inline in the Trace
+- **Live watch**: point the local server at `~/.claude/projects` and a running session streams in as it is written — including transcripts of agents dispatched mid-session
+- **Searchable Timeline**: browse tool calls, thoughts, diffs, file reads, terminal commands, and results, with filters for entry type, tool, time range and token range
+- **Token Analytics**: input, output and — since prompt caching carries almost all of a long session's input — cached tokens, counted once per API response rather than once per log entry
 - **Session Compare**: diff two runs across messages, tokens, tools, and models
-- **AI Retrospective**: surface strengths, weaknesses, and next-step improvements
-- **Prompt Review**: inspect prompt and collaboration quality after the fact
+- **AI Retrospective**: surface strengths, weaknesses, and next-step improvements by handing a compressed trace to your local Claude CLI
 
 ## Who It's For
 
@@ -86,25 +88,52 @@ If you use Claude Code seriously, this helps you move from "I captured a trace" 
 - Anyone who wants to learn from real AI coding traces instead of guessing
 ## Screenshots
 
-### Session Intelligence
+### Finding a session
+
+Sessions in `~/.claude/projects` are discovered automatically. A card marked
+`1 AGENT` dispatched a subagent, so there is a transcript to open alongside it.
+
+![Live discovery](docs/screenshots/discovery-sessions.png)
+
+### Agent Flow — Canvas
+
+One cycle at a time: the model requests, the harness dispatches, the tool
+returns, the result feeds back. The panel names the hop you are on and what
+comes next.
+
+| Tool result returning to the agent | A file edit mid-flight |
+| --- | --- |
+| ![Canvas replaying a Read result](docs/screenshots/agent-flow-canvas-read.png) | ![Canvas replaying an Edit result](docs/screenshots/agent-flow-canvas-edit.png) |
+
+### Agent Flow — Trace
+
+The same run as a table. Three tracks across the top place every cycle on real
+elapsed time; `Turns` and `Calls` control how much of the run is folded away.
+Selecting a cycle opens its payload, result, hops and timing.
+
+| Every cycle, scaled by duration | Collapsed to turns and replies |
+| --- | --- |
+| ![Trace listing every cycle](docs/screenshots/trace-cycles.png) | ![Trace collapsed to turns](docs/screenshots/trace-turns.png) |
+
+### Subagents
+
+Work handed to another agent, followed all the way through: what it was asked,
+what it did, what it cost, and what came back. A dispatch row in the Trace
+expands into that agent's own trace, inspected through the same panel.
+
+| The Subagents view | A dispatch expanded inline in the Trace |
+| --- | --- |
+| ![Subagents view](docs/screenshots/subagents.png) | ![A dispatch expanded in the Trace](docs/screenshots/trace-subagent-expanded.png) |
+
+### Session intelligence
 
 | Session Overview | Token Usage |
 | --- | --- |
 | ![Session Overview](docs/screenshots/session-overview.png) | ![Token Usage](docs/screenshots/token-usage.png) |
 
-| Session Timeline | AI Analysis |
+| Timeline, with the retrospective panel | Session Compare |
 | --- | --- |
-| ![Session Timeline](docs/screenshots/session-timeline.png) | ![AI Analysis](docs/screenshots/ai-analysis.png) |
-
-### Flow Visualization
-
-| Conversation Flow | Agent Flow |
-| --- | --- |
-| ![Conversation Flow](docs/screenshots/conversation-flow.png) | ![Agent Flow Bash Return](docs/screenshots/agent-flow-bash.png) |
-
-| Session Compare | Agent Flow Assistant Return |
-| --- | --- |
-| ![Session Compare](docs/screenshots/session-compare.png) | ![Agent Flow Assistant Return](docs/screenshots/agent-flow-assistant.png) |
+| ![Session timeline](docs/screenshots/session-timeline.png) | ![Session compare](docs/screenshots/session-compare.png) |
 
 ## Quick Start
 
@@ -112,7 +141,7 @@ Bring your own Claude Code `.jsonl` trace and open it locally in a few minutes.
 
 ### Requirements
 
-- Node.js 18+
+- Node.js 20.19+ — `chokidar` 5, which powers the live watch, requires it. CI builds on Node 22.
 - npm
 
 ### Install
@@ -130,6 +159,13 @@ npm install
 ```
 
 Open `http://localhost:3000`.
+
+`start.sh` starts two processes: the Vite dev server on port 3000, and a local
+watcher (`server.cjs`) on port 4000. The watcher is what scans
+`~/.claude/projects` for recent sessions, streams a live one as it is written,
+and shells out to your local `claude` CLI for the Retrospective view. Nothing
+leaves your machine, and the frontend works without the watcher if you upload a
+`.jsonl` file by hand — you just lose discovery and live watch.
 
 ### Build
 
@@ -154,17 +190,18 @@ Tip: if you plan to share the project, recording a short before/after comparison
 
 ## Workspace Views
 
+These are the entries in the left-hand nav, in order.
+
 | View | What You Learn |
 | --- | --- |
+| Agent Flow | Two tabs over one timeline: **Canvas** animates the handoffs between user, main agent, assistant and tools; **Trace** lists every cycle on real elapsed time and lets you inspect one |
 | Session Overview | High-level stats for tokens, messages, models, duration, and tools |
-| Session Timeline | Chronological actions, tool usage, diffs, and results |
-| Agent Flow | Animated handoffs between user, main agent, assistant, and tools |
-| Conversation Flow | Parent-child structure and message depth |
-| Token Usage | Spikes, cost-heavy turns, and usage trends |
-| AI Analysis | Retrospective insights and suggested improvements |
-| Prompt Optimizer | Prompt quality review and collaboration guidance |
+| Subagents | What each dispatched agent was asked, what it did, how long it ran, what it cost, and what it returned |
+| Retrospective | AI retrospective and prompt-quality review, produced by your local Claude CLI |
 | Session Compare | What changed between two runs |
-| Real-Time Log | Raw event stream and trace inspection |
+| Token Stats | Spikes, expensive turns, and usage trends |
+| Timeline | Chronological actions, tool usage, diffs, and results |
+| Conversation Flow | The raw `uuid`/`parentUuid` structure of the session |
 
 ## Why It Exists
 
@@ -197,37 +234,68 @@ Common fields used by the parser include:
 - `parentUuid`
 - `timestamp`
 - `type`
-- `message`
+- `message` — including `message.id`, which identifies the API response an entry
+  came from. One response is written as one entry per content block, all sharing
+  that id and each repeating the same `usage`, so anything that sums per-response
+  data has to group by it.
 - `isSidechain`
 - `isMeta`
+- `agentId` / `attributionAgent` — present on subagent transcripts
+- `toolUseResult` — carries the `agentId` of a dispatched agent, which is what
+  links a Task cycle to the run it started
+
+### Subagent transcripts
+
+An agent dispatched with the Task tool writes its own file, one level below the
+session it belongs to:
+
+```text
+~/.claude/projects/<project>/<sessionId>/subagents/agent-<agentId>.jsonl
+```
+
+Those entries are a separate conversation with their own root, so they are kept
+out of the session's own entry list and attributed to their agent by `agentId`.
+Discovery finds them, live watch streams them, and the Subagents and Trace views
+read them. A session file opened on its own still shows that a dispatch happened
+— it just has no transcript to expand, and says so.
 
 ## Tech Stack
 
-- React 18
-- TypeScript 5
-- Vite 5
+Frontend:
+
+- React 18, TypeScript 5, Vite 5
 - Tailwind CSS 3
-- Recharts
-- Framer Motion
-- Lucide React
-- html2canvas
-- Zustand
-- XYFlow / React Flow
+- Recharts, XYFlow / React Flow, Framer Motion
+- Lucide React, react-markdown, react-diff-viewer-continued
+- Zustand, html2canvas
+
+Local watcher (`server.cjs`):
+
+- Express 5 and `ws` — discovery over HTTP, log streaming over WebSocket
+- chokidar 5 — file watching
+
+The Agent Flow canvas is drawn with the Canvas 2D API rather than a graph
+library; React Flow is used elsewhere.
 
 ## Project Structure
 
 ```text
 claude-trace-replay/
+├── .github/workflows/ci.yml  # Type-check and build on every pull request
 ├── docs/
 │   └── screenshots/          # README media and product visuals
 ├── src/
-│   ├── components/           # Dashboards and visualization UI
+│   ├── components/
+│   │   ├── AgentFlowView/    # Canvas + Trace: graph building, playback, inspector
+│   │   └── ...               # Overview, Subagents, Timeline, Compare, Retrospective
 │   ├── hooks/                # Playback and interaction hooks
 │   ├── types/                # Domain types
 │   ├── utils/                # Trace parsing, analysis, and helper logic
-│   ├── App.tsx               # Application shell
+│   ├── App.tsx               # Application shell and nav
 │   ├── main.tsx              # Entry point
 │   └── index.css             # Global styling
+├── server.cjs                # Local watcher: discovery, live streaming, CLI analysis
+├── start.sh                  # Starts the watcher and the dev server together
 ├── package.json
 └── README.md
 ```
@@ -235,17 +303,38 @@ claude-trace-replay/
 ## Development
 
 ```bash
-npm run dev       # Start the Vite development server
+npm run dev       # Start the Vite development server (frontend only)
 npm run build     # Type-check and build for production
 npm run preview   # Preview the production build locally
-npm run lint      # Run ESLint
+node server.cjs   # Start the watcher on its own, on port 4000
 ```
+
+`npm run lint` is defined but does not currently run: the repo has ESLint
+installed with no configuration file, so the command exits with
+`couldn't find a configuration file`. CI runs `npm ci && npm run build` — a full
+type-check and build — on every pull request. Adding an ESLint config is a
+good first contribution.
+
+### Verifying parser changes
+
+The parser is the part of this project most likely to be silently wrong, because
+a wrong number still renders. When changing it, compute the expected value
+independently — straight from the raw `.jsonl`, by a different route than the
+code under test — and compare. Deriving the expectation the same way the code
+does proves only that you are consistently wrong; that has happened here, and it
+is documented in the commit history.
 
 ## Roadmap
 
 - Add anonymized sample traces so first-time users can explore instantly
-- Improve large-session performance and visualization density
-- Add more flow layout modes for complex agent chains
+- Draw dispatched subagents on the Agent Flow canvas — it needs a second agent
+  lane, so today they are visible in Trace and the Subagents view but not on the
+  canvas
+- Virtualize the remaining unbounded lists; Conversation Flow renders every node
+  and is the worst offender on a large session
+- Add an ESLint configuration so `npm run lint` works, and put it in CI
+- Surface failure, retry and repeat-command signals as findings rather than
+  leaving them to be spotted by eye
 - Add export presets for reports and retrospectives
 
 ## Contributing
