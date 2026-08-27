@@ -252,6 +252,27 @@ export interface HookExecution {
   systemMessage?: string;
 }
 
+/**
+ * Who a hook command belongs to.
+ *
+ * Resolved by the local server against what is installed on this machine now —
+ * a trace recorded elsewhere, or before a plugin was removed, will not match.
+ * Treat a miss as "cannot tell", never as "no owner".
+ */
+export interface HookSource {
+  source: 'plugin' | 'settings';
+  /** Plugin name, or the settings file path for a hook configured directly. */
+  name: string;
+  marketplace?: string;
+  version?: string;
+  root?: string;
+  /** Lifecycle events the source declares this command for. */
+  events?: string[];
+  timeout?: number;
+  /** Two sources declare the same command; the log cannot separate them. */
+  ambiguous?: boolean;
+}
+
 // ============ Subagents ============
 
 /**

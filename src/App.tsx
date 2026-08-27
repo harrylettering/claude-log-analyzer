@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { BarChart2, MessageSquare, Clock, Zap, AlertCircle, Loader2, GitMerge, Sparkles, Activity, Terminal, Search, HardDrive, PlayCircle, Upload, Share2, Calendar, Copy, Check, Bot, Webhook } from 'lucide-react'
 import { appendLogContent, createLogSession } from './utils/logParser'
-import type { ParsedLogData } from './types/log'
+import type { ParsedLogData, HookSource } from './types/log'
 import { FileUpload } from './components/FileUpload'
 import { SessionOverview } from './components/SessionOverview'
 import { TokenDashboard } from './components/TokenDashboard'
@@ -42,6 +42,8 @@ export default function App() {
   // --- WebSocket live watch state ---
   const [isWsConnected, setIsWsConnected] = useState(false)
   const [discoveryList, setDiscoveryList] = useState<any[]>([])
+  // 哪个插件装了哪个 hook —— 只有服务端能读文件系统，所以由它算好发过来。
+  const [hookSources, setHookSources] = useState<Record<string, HookSource>>({})
   const [manualPath, setManualPath] = useState('')
   const [scanWindowHours, setScanWindowHours] = useState<number>(24)
   // Session id most recently copied, so the card can confirm the copy landed.
@@ -90,6 +92,8 @@ export default function App() {
         
         if (type === 'discovery-list') {
           setDiscoveryList(payload)
+        } else if (type === 'hook-sources') {
+          setHookSources(payload?.resolve ?? {})
         } else if (type === 'log-entry') {
           appendLiveLogContent(payload)
         } else if (type === 'session-reset') {
@@ -119,6 +123,18 @@ export default function App() {
   useEffect(() => () => {
     if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
   }, [])
+
+  /**
+   * 会话的工作目录只有解析出条目之后才知道，而项目自己的
+   * .claude/settings.json 里声明的 hook 只能靠它找到 —— 所以拿到之后再问一次。
+   */
+  const sessionCwd = logData?.entries.find((entry) => entry.cwd)?.cwd
+  useEffect(() => {
+    if (!sessionCwd) return
+    const ws = wsRef.current
+    if (ws?.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'get-hook-sources', data: { cwd: sessionCwd } }))
+  }, [sessionCwd])
 
   const copySessionId = useCallback(async (sessionId: string) => {
     // writeText is unavailable outside a secure context and throws when the
@@ -478,7 +494,7 @@ export default function App() {
     switch (currentView) {
       case 'overview': return <SessionOverview data={logData} />
       case 'subagents': return <SubagentPanel data={logData} />
-      case 'hooks': return <HookPanel data={logData} />
+      case 'hooks': return <HookPanel data={logData} sources={hookSources} />
       case 'prompt-optimizer': return (
         <PromptOptimizer
           data={logData}
