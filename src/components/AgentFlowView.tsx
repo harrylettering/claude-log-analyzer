@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Share2, ListTree } from 'lucide-react'
-import type { ParsedLogData, SubagentRun } from '../types/log'
+import type { ParsedLogData, SubagentRun, HookExecution } from '../types/log'
 import { AgentCanvasNew } from './AgentFlowView/AgentCanvasNew'
 import { TraceInspector } from './AgentFlowView/TraceInspector'
 import { buildFlowTimeline, EMPTY_TIMELINE } from './AgentFlowView/simulation/flowTimeline'
@@ -66,6 +66,18 @@ export function AgentFlowView({ data }: AgentFlowViewProps) {
       })
     }
     return traces
+  }, [data])
+
+  /** hook 按它包裹的 tool_use id 索引，供轨迹逐回合拆分耗时。 */
+  const hooksByToolUse = useMemo(() => {
+    const map = new Map<string, HookExecution[]>()
+    for (const hook of data?.hooks ?? []) {
+      if (!hook.toolUseId) continue
+      const existing = map.get(hook.toolUseId)
+      if (existing) existing.push(hook)
+      else map.set(hook.toolUseId, [hook])
+    }
+    return map
   }, [data])
 
   const handleSeek = useCallback((time: number) => setSharedTime(time), [])
@@ -143,6 +155,7 @@ export function AgentFlowView({ data }: AgentFlowViewProps) {
             currentTime={sharedTime}
             onSeek={handleSeek}
             subagentTraces={subagentTraces}
+            hooksByToolUse={hooksByToolUse}
           />
         ) : (
           <AgentCanvasNew timeline={timeline} initialTime={sharedTime} onTimeCommit={setSharedTime} />

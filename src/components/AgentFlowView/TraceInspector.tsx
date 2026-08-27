@@ -7,7 +7,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { CycleTiming, FlowTimeline } from './simulation/flowTimeline'
 import type { FlowCycleKind } from './simulation/canvasBuilder'
-import type { SubagentRun } from '../../types/log'
+import type { SubagentRun, HookExecution } from '../../types/log'
 import { compactPaths } from './lib/pathText'
 import {
   addTokenTotals,
@@ -101,9 +101,11 @@ interface TraceInspectorProps {
   onSeek: (time: number) => void
   /** 每个子 agent 自己的一条轨迹，按 agentId 索引。 */
   subagentTraces?: Map<string, SubagentTrace>
+  /** 每次工具调用前后跑过的 hook，按 tool_use id 索引。 */
+  hooksByToolUse?: Map<string, HookExecution[]>
 }
 
-export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }: TraceInspectorProps) {
+export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces, hooksByToolUse }: TraceInspectorProps) {
   // 展开了执行轨迹的派发回合。子 agent 通常只有一两个，默认收起，
   // 但一旦展开就该看到全部 —— 派发这一行本身没有信息量，信息全在它下面。
   const [expandedAgents, setExpandedAgents] = useState<Set<string>>(new Set())
@@ -564,6 +566,7 @@ export function TraceInspector({ timeline, currentTime, onSeek, subagentTraces }
               dispatchedTrace={detailDispatchedTrace}
               withinRun={detailWithinRun}
               resolveEntity={subTiming ? subEntityName : entityName}
+              hooks={detailTiming.cycle.toolUseId ? hooksByToolUse?.get(detailTiming.cycle.toolUseId) : undefined}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-xs" style={{ color: COLORS.textMuted }}>
@@ -590,6 +593,7 @@ function CycleDetail({
   dispatchedTrace,
   withinRun,
   resolveEntity,
+  hooks,
 }: {
   timing: CycleTiming
   detailTab: DetailTab
@@ -603,7 +607,15 @@ function CycleDetail({
    * 必须跟着回合所属的那条轨迹走 —— 子 agent 有自己的一套节点，拿主轨迹去查会查不到。
    */
   resolveEntity: (entityId: string) => string
+  /** 包裹这次调用的 hook。它们的耗时已经含在回合耗时里。 */
+  hooks?: HookExecution[]
 }) {
+  const timedHooks = hooks?.filter((hook) => hook.durationMs !== undefined) ?? []
+  const hookTotalMs = timedHooks.length > 0
+    ? timedHooks.reduce((sum, hook) => sum + (hook.durationMs as number), 0)
+    : undefined
+  const failedHooks = hooks?.filter((hook) => hook.isError) ?? []
+
   return (
     <>
       {withinRun && (
@@ -661,6 +673,18 @@ function CycleDetail({
                   <DetailRow label="Kind" value={timing.cycle.kind} />
                   {timing.cycle.toolName && <DetailRow label="Tool" value={timing.cycle.toolName} />}
                   {timing.cycle.model && <DetailRow label="Model" value={timing.cycle.model} />}
+                  {/* hook 失败不会让工具调用失败，所以这一行仍然是 Completed ——
+                      不在这里说出来，它就永远没有出现的地方。 */}
+                  {failedHooks.length > 0 && (
+                    <div
+                      className="rounded border px-2 py-1.5 text-[11px] leading-4"
+                      style={{ borderColor: 'rgba(245, 158, 11, 0.4)', background: 'rgba(245, 158, 11, 0.1)', color: '#fbbf24' }}
+                    >
+                      {failedHooks.length} {failedHooks.length === 1 ? 'hook' : 'hooks'} around this call exited
+                      non-zero: {failedHooks.map((hook) => hook.hookName).join(', ')}. The call itself was
+                      unaffected.
+                    </div>
+                  )}
                   {/* 派发回合本身几乎没有内容 —— 它的结果只是「agent 已启动」。
                       真正发生了什么在子 agent 那边，这里至少要指出去。 */}
                   {dispatchedTrace && (
@@ -728,6 +752,14 @@ function CycleDetail({
                   <DetailRow label="Started" value={formatClock(timing.startedAtMs)} />
                   <DetailRow label="Ended" value={formatClock(timing.endedAtMs)} />
                   <DetailRow label="Duration" value={formatDuration(timing.durationMs)} />
+                  {/* 这一跳的耗时里有多少是还没开始跑工具就付掉的。
+                      一个 100ms 的 hook 挂在 80ms 的工具前面，看起来就是「工具慢」。 */}
+                  {hookTotalMs !== undefined && (
+                    <DetailRow
+                      label="Of which hooks"
+                      value={`${formatDuration(hookTotalMs)} · ${hooks!.length} ${hooks!.length === 1 ? 'hook' : 'hooks'}`}
+                    />
+                  )}
                   {/* 播放位置只对主轨迹成立。子 agent 的回合在画布的时间轴上没有位置，
                       把它自己那条轨迹的秒数显示成 Playback 会让人以为可以跳过去。 */}
                   {!withinRun && <DetailRow label="Playback" value={`${timing.startTime.toFixed(1)}s`} />}

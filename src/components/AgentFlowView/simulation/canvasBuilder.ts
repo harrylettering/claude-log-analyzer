@@ -95,6 +95,8 @@ export interface FlowCycle {
    * 有它才能把「派发」这个回合和它真正做了什么接起来。
    */
   subagentId?: string
+  /** 这个回合的 tool_use id，用来把 hook 的执行记录挂回它所包裹的那次调用。 */
+  toolUseId?: string
   usage?: TokenTotals
 }
 
@@ -708,7 +710,10 @@ export class CanvasBuilder {
 
     if (kind === 'tool_call' && contentType === ContentType.TOOL_USE && item) {
       const toolId = item.id as string
-      if (toolId) this.pendingToolCycles.set(toolId, cycle)
+      if (toolId) {
+        cycle.toolUseId = toolId
+        this.pendingToolCycles.set(toolId, cycle)
+      }
     }
   }
 
