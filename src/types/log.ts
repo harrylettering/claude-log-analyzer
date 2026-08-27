@@ -205,6 +205,72 @@ export interface ToolCall {
   result?: unknown;
   isError?: boolean;
   durationMs?: number;
+  /**
+   * Hooks that ran around this call. `durationMs` above is wall clock and
+   * therefore already includes them — keeping the parts lets a slow tool be
+   * told apart from a slow hook in front of a fast one.
+   */
+  hooks?: HookExecution[];
+}
+
+// ============ Hooks ============
+
+/**
+ * One hook run, as recorded in an `attachment` entry.
+ *
+ * Hooks are the part of a session nothing currently reports on, and they are
+ * not free: a PreToolUse hook runs before every matching tool call, so its cost
+ * is paid once per call for the whole session.
+ */
+export interface HookExecution {
+  uuid: string;
+  timestamp: string;
+  /** Full name as logged, e.g. "PreToolUse:Bash". */
+  hookName: string;
+  /** The lifecycle event: PreToolUse, PostToolUse, SessionStart, … */
+  hookEvent: string;
+  /** The half after the colon — the tool or trigger it matched on. */
+  matcher?: string;
+  /**
+   * For PreToolUse/PostToolUse this is the id of the tool call the hook ran
+   * around, which is what lets a tool's wall time be split into hook overhead
+   * and actual execution. For lifecycle events it is an unrelated id.
+   */
+  toolUseId?: string;
+  command?: string;
+  durationMs?: number;
+  exitCode?: number;
+  /**
+   * A hook that failed is still logged with `type: "hook_success"` — the
+   * attachment type is not a status. Only the exit code says what happened,
+   * which is why a broken hook can fail for months without anyone noticing.
+   */
+  isError: boolean;
+  stdout?: string;
+  stderr?: string;
+  /** The message a hook asked to surface, from `hook_system_message`. */
+  systemMessage?: string;
+}
+
+/**
+ * Who a hook command belongs to.
+ *
+ * Resolved by the local server against what is installed on this machine now —
+ * a trace recorded elsewhere, or before a plugin was removed, will not match.
+ * Treat a miss as "cannot tell", never as "no owner".
+ */
+export interface HookSource {
+  source: 'plugin' | 'settings';
+  /** Plugin name, or the settings file path for a hook configured directly. */
+  name: string;
+  marketplace?: string;
+  version?: string;
+  root?: string;
+  /** Lifecycle events the source declares this command for. */
+  events?: string[];
+  timeout?: number;
+  /** Two sources declare the same command; the log cannot separate them. */
+  ambiguous?: boolean;
 }
 
 // ============ Subagents ============
@@ -295,6 +361,8 @@ export interface ParsedLogData {
    * root, so merging them would break the uuid tree and inflate every count.
    */
   subagents: SubagentRun[];
+  /** Every hook run in the session, in the order they were logged. */
+  hooks: HookExecution[];
   tokenUsage: Array<{
     timestamp: string;
     inputTokens: number;

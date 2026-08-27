@@ -10,6 +10,7 @@ import type {
   SubagentRun,
   SubagentStatus,
   TokenCounters,
+  HookExecution,
 } from '../types/log';
 import type { AgentAction } from '../types/agent';
 import {
@@ -429,6 +430,13 @@ export interface LogSession {
   // Dispatched agents, keyed by agentId. Populated from two independent
   // directions — the parent's dispatch record and the agent's own transcript —
   // which can arrive in either order, so both sides upsert into the same entry.
+  hooks: HookExecution[];
+  /**
+   * Hooks by the tool call they ran around. A hook can be logged before its
+   * tool call is parsed, so they are collected here and joined at snapshot
+   * time rather than assumed to arrive in order.
+   */
+  hooksByToolUse: Map<string, HookExecution[]>;
   subagents: Map<string, SubagentRun>;
   // Per-agent bookkeeping, kept out of SubagentRun so the public shape stays
   // free of parser scratch state.
@@ -453,10 +461,70 @@ export function createLogSession(): LogSession {
     minTimestamp: Infinity,
     maxTimestamp: -Infinity,
     models: new Set(),
+    hooks: [],
+    hooksByToolUse: new Map(),
     subagents: new Map(),
     subagentPending: new Map(),
     subagentCountedIds: new Map(),
   };
+}
+
+// ============ Hooks ============
+
+/**
+ * Read a hook run out of an attachment entry, or return null if it is not one.
+ *
+ * Both shapes count: `hook_success` carries the run itself (command, timing,
+ * exit code, output), and `hook_system_message` carries a message the hook
+ * asked to put in front of the model. The former's name is misleading — a hook
+ * that exits non-zero is still logged as `hook_success`, so success has to be
+ * read off the exit code, never off the type.
+ */
+function extractHookExecution(entry: LogEntry): HookExecution | null {
+  if (entry.type !== 'attachment') return null;
+  const attachment = (entry as any).attachment;
+  if (!attachment || typeof attachment !== 'object') return null;
+
+  const kind = attachment.type;
+  if (kind !== 'hook_success' && kind !== 'hook_system_message') return null;
+
+  const hookName = typeof attachment.hookName === 'string' ? attachment.hookName : '';
+  if (!hookName) return null;
+
+  const hookEvent = typeof attachment.hookEvent === 'string' ? attachment.hookEvent : '';
+  // "PreToolUse:Bash" → matcher "Bash". Lifecycle hooks name their trigger the
+  // same way ("SessionStart:startup"), so this is not tool-specific.
+  const colon = hookName.indexOf(':');
+  const matcher = colon >= 0 ? hookName.slice(colon + 1) : undefined;
+
+  const exitCode = typeof attachment.exitCode === 'number' ? attachment.exitCode : undefined;
+
+  return {
+    uuid: entry.uuid,
+    timestamp: entry.timestamp,
+    hookName,
+    hookEvent: hookEvent || (colon >= 0 ? hookName.slice(0, colon) : hookName),
+    matcher,
+    toolUseId: typeof attachment.toolUseID === 'string' ? attachment.toolUseID : undefined,
+    command: typeof attachment.command === 'string' ? attachment.command : undefined,
+    durationMs: typeof attachment.durationMs === 'number' ? attachment.durationMs : undefined,
+    exitCode,
+    isError: exitCode !== undefined && exitCode !== 0,
+    stdout: typeof attachment.stdout === 'string' && attachment.stdout ? attachment.stdout : undefined,
+    stderr: typeof attachment.stderr === 'string' && attachment.stderr ? attachment.stderr : undefined,
+    systemMessage:
+      kind === 'hook_system_message' && typeof attachment.content === 'string' && attachment.content
+        ? attachment.content
+        : undefined,
+  };
+}
+
+function ingestHook(session: LogSession, hook: HookExecution): void {
+  session.hooks.push(hook);
+  if (!hook.toolUseId) return;
+  const existing = session.hooksByToolUse.get(hook.toolUseId);
+  if (existing) existing.push(hook);
+  else session.hooksByToolUse.set(hook.toolUseId, [hook]);
 }
 
 // ============ Subagents ============
@@ -805,6 +873,9 @@ function ingestLine(session: LogSession, line: string): void {
 
     enrichEntry(entry, toolCalls, pendingToolCalls);
 
+    const hook = extractHookExecution(entry);
+    if (hook) ingestHook(session, hook);
+
     // The parent side of a Task dispatch: this is the only place the agentId
     // appears in the session's own log, and it is what ties a run to the entry
     // that launched it.
@@ -866,12 +937,22 @@ function buildParseResult(session: LogSession): ParseResult {
 
   const subagents = [...session.subagents.values()].map((run) => finalizeRun(session, run));
 
+  // Joined here rather than at ingest time: a hook is logged before the tool
+  // result that completes its call, so the call may not exist yet.
+  if (session.hooksByToolUse.size > 0) {
+    for (const call of toolCalls) {
+      const hooks = session.hooksByToolUse.get(call.id);
+      if (hooks) call.hooks = hooks;
+    }
+  }
+
   return {
     data: {
       entries,
       stats: buildStats(session, toolCalls.length),
       toolCalls,
       subagents,
+      hooks: session.hooks.slice(),
       tokenUsage,
       turnDurations,
     },

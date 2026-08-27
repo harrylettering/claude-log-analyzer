@@ -530,7 +530,154 @@ function describeAnalysisFailure(code, output) {
     return null;
 }
 
+/**
+ * Flatten hook attribution into one lookup the frontend can use directly:
+ * command string → who owns it, or nothing when it cannot be told.
+ */
+function buildHookSourceIndex(projectCwd) {
+    const sources = getHookSources(projectCwd);
+    const resolved = {};
+
+    for (const [command, origin] of Object.entries(sources.commands)) {
+        resolved[command] = origin;
+    }
+
+    // Commands seen in logs but declared nowhere still resolve if exactly one
+    // installed plugin ships the script they point at.
+    return {
+        ...sources,
+        resolve: resolved,
+        // Handed over so the client can ask about a command the scan never saw
+        // declared — the server answers those on demand below.
+        canResolveByFile: sources.pluginRoots.length > 0,
+    };
+}
+
 // --- Discovery scanner with exclusions and full-path output ---
+/**
+ * Work out which plugin (or settings file) a hook command came from.
+ *
+ * The log records the command verbatim, and a plugin's hooks are written with
+ * `${CLAUDE_PLUGIN_ROOT}` left unexpanded — so every plugin's PreToolUse hook
+ * reads as `bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/pre-tool-use.sh` and the
+ * session alone cannot say whose it is.
+ *
+ * It can be recovered, because the string in the log is byte-identical to the
+ * one declared in the plugin's hooks.json. That is the primary match; failing
+ * that, the path after the placeholder is checked against each plugin's install
+ * directory.
+ *
+ * This resolves against what is installed on THIS machine right now, which is
+ * not necessarily what was installed when the trace was recorded. Callers are
+ * expected to say so rather than present the answer as fact.
+ */
+const PLUGIN_ROOT_TOKEN = '${CLAUDE_PLUGIN_ROOT}';
+
+function readJsonSafe(filePath) {
+    try {
+        return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch {
+        return null;
+    }
+}
+
+/** Pull every declared command out of a hooks config block. */
+function collectDeclaredCommands(hooksConfig, into, origin) {
+    if (!hooksConfig || typeof hooksConfig !== 'object') return;
+    for (const [event, matchers] of Object.entries(hooksConfig)) {
+        if (!Array.isArray(matchers)) continue;
+        for (const matcher of matchers) {
+            const entries = matcher && Array.isArray(matcher.hooks) ? matcher.hooks : [];
+            for (const hook of entries) {
+                if (!hook || typeof hook.command !== 'string') continue;
+                const existing = into.get(hook.command);
+                if (existing) {
+                    // Two sources declaring the same command cannot be told
+                    // apart from the log, so neither is claimed.
+                    if (existing.name !== origin.name) existing.ambiguous = true;
+                    if (!existing.events.includes(event)) existing.events.push(event);
+                    continue;
+                }
+                into.set(hook.command, {
+                    ...origin,
+                    events: [event],
+                    timeout: typeof hook.timeout === 'number' ? hook.timeout : undefined,
+                    ambiguous: false,
+                });
+            }
+        }
+    }
+}
+
+function getHookSources(projectCwd) {
+    const byCommand = new Map();
+    const plugins = [];
+
+    // 1. Installed plugins: their declared commands, and their install roots.
+    const installed = readJsonSafe(path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json'));
+    for (const [key, entries] of Object.entries(installed?.plugins ?? {})) {
+        const list = Array.isArray(entries) ? entries : [entries];
+        for (const entry of list) {
+            const root = entry?.installPath;
+            if (!root) continue;
+            const [name, marketplace] = key.split('@');
+            const origin = { source: 'plugin', name: name || key, marketplace, root, version: entry.version };
+            plugins.push(origin);
+
+            const hooksJson =
+                readJsonSafe(path.join(root, 'hooks', 'hooks.json')) ??
+                readJsonSafe(path.join(root, '.claude-plugin', 'hooks.json'));
+            collectDeclaredCommands(hooksJson?.hooks ?? hooksJson, byCommand, origin);
+        }
+    }
+
+    // 2. Settings files, whose commands are literal paths and need no resolving
+    //    but should still be attributable.
+    const settingsFiles = [
+        path.join(os.homedir(), '.claude', 'settings.json'),
+        path.join(os.homedir(), '.claude', 'settings.local.json'),
+    ];
+    if (projectCwd) {
+        settingsFiles.push(path.join(projectCwd, '.claude', 'settings.json'));
+        settingsFiles.push(path.join(projectCwd, '.claude', 'settings.local.json'));
+    }
+    for (const file of settingsFiles) {
+        const settings = readJsonSafe(file);
+        if (!settings?.hooks) continue;
+        collectDeclaredCommands(settings.hooks, byCommand, {
+            source: 'settings',
+            name: file.replace(os.homedir(), '~'),
+        });
+    }
+
+    return {
+        commands: Object.fromEntries(byCommand),
+        // Kept so a command nobody declared can still be traced by looking for
+        // the script inside each plugin.
+        pluginRoots: plugins.map(({ name, marketplace, root, version }) => ({ name, marketplace, root, version })),
+        placeholder: PLUGIN_ROOT_TOKEN,
+        scannedAt: new Date().toISOString(),
+    };
+}
+
+/** Fallback: find which plugin actually ships the script a command points at. */
+function resolveByFile(command, pluginRoots) {
+    const index = command.indexOf(PLUGIN_ROOT_TOKEN);
+    if (index < 0) return null;
+    const relative = command.slice(index + PLUGIN_ROOT_TOKEN.length).trim().split(/\s/)[0].replace(/^\/+/, '');
+    if (!relative) return null;
+
+    const matches = pluginRoots.filter((plugin) => {
+        try {
+            return fs.statSync(path.join(plugin.root, relative)).isFile();
+        } catch {
+            return false;
+        }
+    });
+    if (matches.length !== 1) return matches.length > 1 ? { ambiguous: true } : null;
+    return { source: 'plugin', name: matches[0].name, marketplace: matches[0].marketplace, root: matches[0].root, ambiguous: false };
+}
+
 const SUBAGENT_DIR_NAME = 'subagents';
 // How often to look for transcripts of agents dispatched mid-session.
 const SUBAGENT_SCAN_INTERVAL_MS = 2000;
@@ -875,6 +1022,23 @@ wss.on('connection', (ws) => {
                 const hours = data?.hours || 24;
                 const list = getRecentSessions(hours);
                 ws.send(JSON.stringify({ type: 'discovery-list', payload: list }));
+                // Sent alongside the list because the frontend cannot read the
+                // filesystem, and a hook command in a log names no owner.
+                ws.send(JSON.stringify({ type: 'hook-sources', payload: buildHookSourceIndex(data?.cwd) }));
+            } else if (type === 'get-hook-sources') {
+                // Requested again once a session is open, because a project's
+                // own .claude/settings.json can only be found via its cwd.
+                ws.send(JSON.stringify({ type: 'hook-sources', payload: buildHookSourceIndex(data?.cwd) }));
+            } else if (type === 'resolve-hook-command') {
+                // For a command the declared-hooks scan did not cover, look for
+                // the script inside each installed plugin.
+                const command = typeof data?.command === 'string' ? data.command : '';
+                const sources = getHookSources(data?.cwd);
+                const byFile = command ? resolveByFile(command, sources.pluginRoots) : null;
+                ws.send(JSON.stringify({
+                    type: 'hook-command-resolved',
+                    payload: { command, origin: sources.commands[command] ?? byFile ?? null },
+                }));
             } else if (type === 'start-watch') {
                 console.log(`[DEBUG] Received start-watch: ${data.path}`);
                 watcher.watchPath(data.path);
