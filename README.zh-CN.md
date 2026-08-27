@@ -206,7 +206,6 @@ npm run preview
 | Session Compare | 对比两次运行的差异 |
 | Token Stats | 查看 token 峰值、高成本轮次和趋势变化 |
 | Timeline | 按时间顺序查看操作、工具使用、diff 和结果 |
-| Conversation Flow | 查看会话原始的 `uuid`/`parentUuid` 结构 |
 
 ## 为什么会做这个项目
 
@@ -325,7 +324,7 @@ node server.cjs   # 单独启动监听服务，端口 4000
 - 加入匿名 sample traces，方便第一次使用的人直接探索
 - 在 Agent Flow 画布上画出子 agent —— 需要给图模型加一条 agent 泳道，所以目前子 agent
   在 Trace 和 Subagents 视图里可见，画布上还没有
-- 给剩下的无上限列表加虚拟化；Conversation Flow 会把每个节点都渲染出来，大会话下最吃亏
+- 给剩下的无上限列表加虚拟化
 - 补一份 ESLint 配置让 `npm run lint` 能用，并接进 CI
 - 把失败、重试、重复命令这类信号做成主动呈现的「发现」，而不是靠人眼去看
 - 增加导出报告和复盘结果的预设
