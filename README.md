@@ -201,7 +201,6 @@ These are the entries in the left-hand nav, in order.
 | Session Compare | What changed between two runs |
 | Token Stats | Spikes, expensive turns, and usage trends |
 | Timeline | Chronological actions, tool usage, diffs, and results |
-| Conversation Flow | The raw `uuid`/`parentUuid` structure of the session |
 
 ## Why It Exists
 
@@ -330,8 +329,7 @@ is documented in the commit history.
 - Draw dispatched subagents on the Agent Flow canvas — it needs a second agent
   lane, so today they are visible in Trace and the Subagents view but not on the
   canvas
-- Virtualize the remaining unbounded lists; Conversation Flow renders every node
-  and is the worst offender on a large session
+- Virtualize the remaining unbounded lists
 - Add an ESLint configuration so `npm run lint` works, and put it in CI
 - Surface failure, retry and repeat-command signals as findings rather than
   leaving them to be spotted by eye

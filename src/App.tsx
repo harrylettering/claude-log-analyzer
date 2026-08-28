@@ -1,19 +1,18 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { BarChart2, MessageSquare, Clock, Zap, AlertCircle, Loader2, GitMerge, Sparkles, Activity, Terminal, Search, HardDrive, PlayCircle, Upload, Share2, Calendar, Copy, Check, Bot, Webhook } from 'lucide-react'
+import { BarChart2, Clock, Zap, AlertCircle, Loader2, GitMerge, Sparkles, Activity, Terminal, Search, HardDrive, PlayCircle, Upload, Share2, Calendar, Copy, Check, Bot, Webhook } from 'lucide-react'
 import { appendLogContent, createLogSession } from './utils/logParser'
 import type { ParsedLogData, HookSource } from './types/log'
 import { FileUpload } from './components/FileUpload'
 import { SessionOverview } from './components/SessionOverview'
 import { TokenDashboard } from './components/TokenDashboard'
 import { TimelineView } from './components/TimelineView'
-import { ConversationFlow } from './components/ConversationFlow'
 import { SessionCompare } from './components/SessionCompare'
 import { PromptOptimizer } from './components/PromptOptimizer'
 import { AgentFlowView } from './components/AgentFlowView'
 import { SubagentPanel } from './components/SubagentPanel'
 import { HookPanel } from './components/HookPanel'
 
-type ViewId = 'overview' | 'tokens' | 'timeline' | 'conversation' | 'compare' | 'prompt-optimizer' | 'agent-flow' | 'subagents' | 'hooks'
+type ViewId = 'overview' | 'tokens' | 'timeline' | 'compare' | 'prompt-optimizer' | 'agent-flow' | 'subagents' | 'hooks'
 
 /** Discovery entries carry the file name; the session id is that without the extension. */
 const getSessionId = (fileName: string) => fileName.replace(/\.jsonl$/, '')
@@ -27,7 +26,6 @@ const navItems: { id: ViewId; label: string; icon: React.ReactNode }[] = [
   { id: 'compare', label: 'Session Compare', icon: <GitMerge className="w-4 h-4" /> },
   { id: 'tokens', label: 'Token Stats', icon: <Zap className="w-4 h-4" /> },
   { id: 'timeline', label: 'Timeline', icon: <Clock className="w-4 h-4" /> },
-  { id: 'conversation', label: 'Conversation Flow', icon: <MessageSquare className="w-4 h-4" /> },
 ]
 
 export default function App() {
@@ -515,7 +513,6 @@ export default function App() {
           onRunCliAnalysis={runClaudeCliAnalysis}
         />
       )
-      case 'conversation': return <ConversationFlow data={logData} />
     }
   }
 
