@@ -41,7 +41,7 @@
 
 4 分钟产品演示：
 
-https://github.com/user-attachments/assets/be7374a6-5f6a-4c87-95f5-defe3974f6ea
+https://github.com/user-attachments/assets/79370643-b03d-4784-adab-25539641bb87
 
 ## 一句话介绍
 
