@@ -38,9 +38,9 @@
 
 ## Demo
 
-Watch the 90-second product demo:
+Watch the 4-minute product demo:
 
-https://github.com/user-attachments/assets/79370643-b03d-4784-adab-25539641bb87
+https://github.com/user-attachments/assets/1a1e3659-18bd-43cf-b5eb-b7d616b6dfc2
 
 ## Short Pitch
 
@@ -124,6 +124,16 @@ expands into that agent's own trace, inspected through the same panel.
 | The Subagents view | A dispatch expanded inline in the Trace |
 | --- | --- |
 | ![Subagents view](docs/screenshots/subagents.png) | ![A dispatch expanded in the Trace](docs/screenshots/trace-subagent-expanded.png) |
+
+### Hooks
+
+Commands the harness runs around your work, and what they cost. A PreToolUse
+hook is paid once per matching call, so a slow one shows up as a slow tool with
+nothing to say otherwise. Failures are called out because nothing else reports
+them: a hook that exits non-zero is still logged as `hook_success`, so only the
+exit code says what happened.
+
+![Hooks](docs/screenshots/hooks.png)
 
 ### Session intelligence
 

@@ -39,9 +39,9 @@
 
 ## Demo
 
-90 秒产品演示：
+4 分钟产品演示：
 
-https://github.com/user-attachments/assets/79370643-b03d-4784-adab-25539641bb87
+https://github.com/user-attachments/assets/1a1e3659-18bd-43cf-b5eb-b7d616b6dfc2
 
 ## 一句话介绍
 
@@ -131,6 +131,14 @@ Trace 里的派发行可以就地展开成那个 agent 自己的轨迹，用同�
 | Subagents 视图 | 在 Trace 中就地展开的派发 |
 | --- | --- |
 | ![Subagents 视图](docs/screenshots/subagents.png) | ![在 Trace 中展开的派发](docs/screenshots/trace-subagent-expanded.png) |
+
+### Hooks
+
+harness 在你每次操作前后跑的命令，以及它们的代价。PreToolUse hook 每次匹配的调用都要付一遍，
+所以一个慢 hook 表现出来就是「这个工具慢」，别处看不出区别。失败会单独列出来，因为没有其他地方
+会报：exit code 非零的 hook 在日志里照样记成 `hook_success`，只有退出码说了实话。
+
+![Hooks](docs/screenshots/hooks.png)
 
 ### 会话洞察
 
